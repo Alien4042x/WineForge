@@ -1266,44 +1266,12 @@ static BOOL unicode_string_contains_ascii_ci( const UNICODE_STRING *str, const c
     return FALSE;
 }
 
-static BOOL ascii_string_contains_ci( const char *str, const char *needle )
-{
-    unsigned int i, j, len, needle_len;
-
-    if (!str || !needle) return FALSE;
-    len = strlen( str );
-    needle_len = strlen( needle );
-    if (!needle_len || needle_len > len) return FALSE;
-
-    for (i = 0; i <= len - needle_len; ++i)
-    {
-        for (j = 0; j < needle_len; ++j)
-        {
-            unsigned char ch = str[i + j];
-            unsigned char cmp = needle[j];
-
-            if (ch >= 'A' && ch <= 'Z') ch += 'a' - 'A';
-            if (cmp >= 'A' && cmp <= 'Z') cmp += 'a' - 'A';
-            if (ch != cmp) break;
-        }
-        if (j == needle_len) return TRUE;
-    }
-    return FALSE;
-}
-
 static BOOL steam_cef_native_vulkan_loader( const UNICODE_STRING *nt_name, const char *module )
 {
     if (!module || strcasecmp( module, "vulkan-1.dll" )) return FALSE;
 
     return unicode_string_contains_ascii_ci( nt_name, "\\steam\\bin\\cef\\" ) ||
            unicode_string_contains_ascii_ci( nt_name, "/steam/bin/cef/" );
-}
-
-static BOOL steam_cef_native_vulkan_loader_path( const char *path, const char *module )
-{
-    if (!module || strcasecmp( module, "vulkan-1.dll" )) return FALSE;
-    return ascii_string_contains_ci( path, "/steam/bin/cef/" ) ||
-           ascii_string_contains_ci( path, "\\steam\\bin\\cef\\" );
 }
 #endif
 
@@ -1432,15 +1400,6 @@ static NTSTATUS find_builtin_dll( UNICODE_STRING *nt_name, ANSI_STRING *exp_name
         ptr = file + pos;
         ptr = prepend( ptr, pe_dir, strlen(pe_dir) );
         ptr = prepend( ptr, dll_paths[i], strlen(dll_paths[i]) );
-#if defined(__APPLE__) && defined(__x86_64__)
-        if (d3dmetal_graphics_backend_enabled() && steam_cef_native_vulkan_loader_path( ptr, file + pos + 1 ))
-        {
-            TRACE( "D3DMetal Steam frontend using native CEF Vulkan loader candidate %s for %s\n",
-                   debugstr_a(ptr), debugstr_us(nt_name) );
-            status = STATUS_DLL_NOT_FOUND;
-            goto done;
-        }
-#endif
         status = open_builtin_pe_file( ptr, &attr, module, size_ptr, image_info, limit_low, limit_high,
                                        load_machine, prefer_native, offset );
         /* use so dir for unix lib */
