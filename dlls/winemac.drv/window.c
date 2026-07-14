@@ -1100,6 +1100,16 @@ static void macdrv_client_surface_detach(struct client_surface *client)
     }
 }
 
+static BOOL is_epic_launcher_process(void);
+static BOOL is_epic_unreal_root_window(HWND hwnd);
+static BOOL epic_get_browser_rect(HWND root, const struct macdrv_win_data *data, HWND *browser, RECT *rect);
+static void epic_update_unreal_client_view_frame(HWND hwnd, struct macdrv_win_data *data);
+
+/*
+ * WineForge launcher-compat: Epic Unreal/CEF Metal view mask.
+ * WineForge-Internal: launcher-compat/epic-launcher-v1.
+ * WineForge-Feature: launcher-compat/epic-unreal-cef-metal-mask-v1.
+ */
 static void macdrv_client_surface_update(struct client_surface *client)
 {
     struct macdrv_client_surface *surface = impl_from_client_surface(client);
@@ -1116,7 +1126,101 @@ static void macdrv_client_surface_update(struct client_surface *client)
     OffsetRect(&rect, data->rects.client.left - data->rects.visible.left, data->rects.client.top - data->rects.visible.top);
     macdrv_set_view_frame(surface->cocoa_view, cgrect_from_rect(rect));
     macdrv_set_view_superview(surface->cocoa_view, toplevel == hwnd ? NULL : data->client_view, data->cocoa_window, NULL, NULL);
+    /* Epic Unreal root windows use the Metal surface as the root view and punch out the CEF child. */
+    if (is_epic_unreal_root_window(toplevel) && data->client_view)
+        epic_update_unreal_client_view_frame(toplevel, data);
     release_win_data(data);
+}
+
+static BOOL is_epic_launcher_process(void)
+{
+    static const WCHAR epic_launcherW[] = {'E','p','i','c','G','a','m','e','s','L','a','u','n','c','h','e','r','.','e','x','e',0};
+    const WCHAR *appname = RtlGetCurrentPeb()->ProcessParameters->ImagePathName.Buffer;
+    const WCHAR *p;
+
+    if ((p = wcsrchr(appname, '/'))) appname = p + 1;
+    if ((p = wcsrchr(appname, '\\'))) appname = p + 1;
+    return !wcsicmp(appname, epic_launcherW);
+}
+
+static BOOL get_epic_class_name(HWND hwnd, WCHAR *class, unsigned int count)
+{
+    UNICODE_STRING name;
+    int ret;
+
+    if (!count) return FALSE;
+    class[0] = 0;
+    name.Buffer = class;
+    name.Length = 0;
+    name.MaximumLength = (count - 1) * sizeof(WCHAR);
+    ret = NtUserGetClassName(hwnd, FALSE, &name);
+    if (ret < 0) ret = 0;
+    if (ret >= count) ret = count - 1;
+    class[ret] = 0;
+    return !!ret;
+}
+
+static BOOL epic_window_class_is(HWND hwnd, const WCHAR *name)
+{
+    WCHAR class[96];
+
+    return get_epic_class_name(hwnd, class, ARRAY_SIZE(class)) && !wcscmp(class, name);
+}
+
+static BOOL is_epic_unreal_root_window(HWND hwnd)
+{
+    static const WCHAR unreal_windowW[] = {'U','n','r','e','a','l','W','i','n','d','o','w',0};
+
+    return is_epic_launcher_process() && hwnd == NtUserGetAncestor(hwnd, GA_ROOT) &&
+           epic_window_class_is(hwnd, unreal_windowW);
+}
+
+static HWND epic_find_child_by_class(HWND hwnd, const WCHAR *name)
+{
+    HWND child, found;
+
+    for (child = NtUserGetWindowRelative(hwnd, GW_CHILD); child; child = NtUserGetWindowRelative(child, GW_HWNDNEXT))
+    {
+        if (epic_window_class_is(child, name)) return child;
+        if ((found = epic_find_child_by_class(child, name))) return found;
+    }
+
+    return NULL;
+}
+
+static BOOL epic_get_browser_rect(HWND root, const struct macdrv_win_data *data, HWND *browser, RECT *rect)
+{
+    static const WCHAR chrome_widgetW[] = {'C','h','r','o','m','e','_','W','i','d','g','e','t','W','i','n','_','0',0};
+    static const WCHAR cef_browser_windowW[] = {'C','e','f','B','r','o','w','s','e','r','W','i','n','d','o','w',0};
+    UINT root_dpi = NtUserGetWinMonitorDpi(root, MDT_RAW_DPI);
+
+    /* Epic alternates between Chrome_WidgetWin_0 and CefBrowserWindow for visible launcher content. */
+    *browser = epic_find_child_by_class(root, chrome_widgetW);
+    if (!*browser) *browser = epic_find_child_by_class(root, cef_browser_windowW);
+    if (!*browser) return FALSE;
+
+    NtUserGetClientRect(*browser, rect, NtUserGetWinMonitorDpi(*browser, MDT_RAW_DPI));
+    NtUserMapWindowPoints(*browser, root, (POINT *)rect, 2, root_dpi);
+    OffsetRect(rect, data->rects.client.left - data->rects.visible.left,
+               data->rects.client.top - data->rects.visible.top);
+    return !IsRectEmpty(rect);
+}
+
+static void epic_update_unreal_client_view_frame(HWND hwnd, struct macdrv_win_data *data)
+{
+    RECT rect, browser_rect;
+    HWND browser;
+
+    if (!is_epic_unreal_root_window(hwnd) || !data->client_view) return;
+    NtUserGetClientRect(hwnd, &rect, NtUserGetWinMonitorDpi(hwnd, MDT_RAW_DPI));
+    OffsetRect(&rect, data->rects.client.left - data->rects.visible.left,
+               data->rects.client.top - data->rects.visible.top);
+    macdrv_set_view_frame(data->client_view, cgrect_from_rect(rect));
+
+    if (epic_get_browser_rect(hwnd, data, &browser, &browser_rect))
+        macdrv_set_view_metal_exclusion_rect(data->client_view, cgrect_from_rect(browser_rect));
+    else
+        macdrv_set_view_metal_exclusion_rect(data->client_view, CGRectNull);
 }
 
 static void macdrv_client_surface_present(struct client_surface *client, HDC hdc)
@@ -1127,6 +1231,19 @@ static void macdrv_client_surface_present(struct client_surface *client, HDC hdc
     TRACE("%s\n", debugstr_client_surface(client));
 
     if (!(data = get_win_data(surface->client.hwnd))) return;
+    if (is_epic_unreal_root_window(surface->client.hwnd))
+    {
+        /* Epic CEF composition path: keep this Metal surface visible and mask around the browser child. */
+        TRACE("masking Epic Unreal Metal view around its CEF child content\n");
+        if (data->client_view && data->client_view != surface->cocoa_view)
+            macdrv_set_view_hidden(data->client_view, TRUE);
+        macdrv_set_view_hidden(surface->cocoa_view, FALSE);
+        macdrv_set_view_metal_hidden(surface->cocoa_view, FALSE);
+        data->client_view = surface->cocoa_view;
+        epic_update_unreal_client_view_frame(surface->client.hwnd, data);
+        release_win_data(data);
+        return;
+    }
     if (data->client_view != surface->cocoa_view)
     {
         if (data->client_view) macdrv_set_view_hidden(data->client_view, TRUE);
@@ -1684,6 +1801,8 @@ void macdrv_WindowPosChanged(HWND hwnd, HWND insert_after, HWND owner_hint, UINT
         sync_window_position(data, swp_flags, &old_rects);
         if (data->cocoa_window)
             set_cocoa_window_properties(data);
+        /* Recompute the Epic CEF exclusion rect after root-window moves/resizes. */
+        epic_update_unreal_client_view_frame(hwnd, data);
     }
 
     if (new_style & WS_VISIBLE)

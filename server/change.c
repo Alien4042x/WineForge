@@ -77,6 +77,15 @@ struct change_record {
     struct filesystem_event event;
 };
 
+#if defined(__APPLE__) && !defined(HAVE_SYS_INOTIFY_H)
+struct change_poll_entry {
+    struct list entry;
+    char *name;
+    struct stat st;
+    int seen;
+};
+#endif
+
 struct dir
 {
     struct object  obj;      /* object header */
@@ -94,6 +103,9 @@ struct dir
     struct process *client_process;  /* client process that has a cache for this directory */
     int             client_entry;    /* entry in client process cache */
     struct list    kernel_object;    /* list of kernel object pointers */
+#if defined(__APPLE__) && !defined(HAVE_SYS_INOTIFY_H)
+    struct list    poll_entries;     /* polling fallback snapshot */
+#endif
 };
 
 static struct fd *dir_get_fd( struct object *obj );
@@ -319,6 +331,221 @@ void sigio_callback(void)
     }
 }
 
+#if defined(__APPLE__) && !defined(HAVE_SYS_INOTIFY_H)
+
+/*
+ * WineForge launcher-compat: macOS directory-change polling fallback.
+ * WineForge-Internal: launcher-compat/epic-launcher-v1.
+ * WineForge-Feature: launcher-compat/epic-install-dir-change-poll-v1.
+ */
+#define CHANGE_POLL_INTERVAL (-500000)  /* 50 ms */
+
+static struct timeout_user *change_poll_timer;
+
+static char *change_poll_get_path( struct dir *dir )
+{
+    char *ret = malloc( PATH_MAX );
+
+    if (!ret) return NULL;
+    if (!fcntl( get_unix_fd( dir->fd ), F_GETPATH, ret )) return ret;
+    free( ret );
+    return NULL;
+}
+
+static struct change_poll_entry *change_poll_find_entry( struct dir *dir, const char *name )
+{
+    struct change_poll_entry *entry;
+
+    LIST_FOR_EACH_ENTRY( entry, &dir->poll_entries, struct change_poll_entry, entry )
+        if (!strcmp( entry->name, name ))
+            return entry;
+    return NULL;
+}
+
+static unsigned int change_poll_name_filter( const struct stat *st )
+{
+    return S_ISDIR( st->st_mode ) ? FILE_NOTIFY_CHANGE_DIR_NAME : FILE_NOTIFY_CHANGE_FILE_NAME;
+}
+
+static unsigned int change_poll_modified_filter( const struct stat *old_st, const struct stat *new_st )
+{
+    unsigned int filter = 0;
+
+    if (old_st->st_mode != new_st->st_mode) filter |= FILE_NOTIFY_CHANGE_ATTRIBUTES;
+    if (old_st->st_size != new_st->st_size) filter |= FILE_NOTIFY_CHANGE_SIZE;
+    if (old_st->st_mtimespec.tv_sec != new_st->st_mtimespec.tv_sec ||
+        old_st->st_mtimespec.tv_nsec != new_st->st_mtimespec.tv_nsec)
+        filter |= FILE_NOTIFY_CHANGE_LAST_WRITE;
+    if (old_st->st_atimespec.tv_sec != new_st->st_atimespec.tv_sec ||
+        old_st->st_atimespec.tv_nsec != new_st->st_atimespec.tv_nsec)
+        filter |= FILE_NOTIFY_CHANGE_LAST_ACCESS;
+    if (old_st->st_ctimespec.tv_sec != new_st->st_ctimespec.tv_sec ||
+        old_st->st_ctimespec.tv_nsec != new_st->st_ctimespec.tv_nsec)
+        filter |= FILE_NOTIFY_CHANGE_ATTRIBUTES | FILE_NOTIFY_CHANGE_CREATION;
+
+    return filter;
+}
+
+static void change_poll_notify( struct dir *dir, unsigned int action, unsigned int filter,
+                                const char *name )
+{
+    struct change_record *record;
+    size_t len;
+
+    if (!(filter & dir->filter)) return;
+
+    if (dir->want_data)
+    {
+        len = strlen( name );
+        if (!(record = malloc( offsetof(struct change_record, event.name[len]) ))) return;
+
+        record->cookie = 0;
+        record->event.action = action;
+        record->event.len = len;
+        memcpy( record->event.name, name, len );
+        list_add_tail( &dir->change_records, &record->entry );
+    }
+
+    fd_async_wake_up( dir->fd, ASYNC_TYPE_WAIT, STATUS_ALERTED );
+}
+
+static void change_poll_free_entries( struct dir *dir )
+{
+    struct change_poll_entry *entry, *next;
+
+    LIST_FOR_EACH_ENTRY_SAFE( entry, next, &dir->poll_entries, struct change_poll_entry, entry )
+    {
+        list_remove( &entry->entry );
+        free( entry->name );
+        free( entry );
+    }
+}
+
+static struct change_poll_entry *change_poll_add_entry( struct dir *dir, const char *name,
+                                                        const struct stat *st )
+{
+    struct change_poll_entry *entry;
+
+    if (!(entry = malloc( sizeof(*entry) ))) return NULL;
+    if (!(entry->name = strdup( name )))
+    {
+        free( entry );
+        return NULL;
+    }
+    entry->st = *st;
+    entry->seen = 1;
+    list_add_tail( &dir->poll_entries, &entry->entry );
+    return entry;
+}
+
+static void change_poll_scan_dir( struct dir *dir, int initial )
+{
+    struct change_poll_entry *entry, *next;
+    struct dirent *de;
+    char *path;
+    DIR *unix_dir;
+    size_t path_len;
+
+    LIST_FOR_EACH_ENTRY( entry, &dir->poll_entries, struct change_poll_entry, entry )
+        entry->seen = 0;
+
+    if (!(path = change_poll_get_path( dir ))) return;
+    if (!(unix_dir = opendir( path )))
+    {
+        free( path );
+        return;
+    }
+
+    path_len = strlen( path );
+
+    while ((de = readdir( unix_dir )))
+    {
+        struct stat st;
+        char *full_path;
+        unsigned int filter;
+
+        if (!strcmp( de->d_name, "." ) || !strcmp( de->d_name, ".." )) continue;
+        if (!(full_path = malloc( path_len + strlen( de->d_name ) + 2 ))) continue;
+        snprintf( full_path, path_len + strlen( de->d_name ) + 2, "%s/%s", path, de->d_name );
+
+        if (lstat( full_path, &st ) == -1)
+        {
+            free( full_path );
+            continue;
+        }
+        free( full_path );
+
+        if (!(entry = change_poll_find_entry( dir, de->d_name )))
+        {
+            entry = change_poll_add_entry( dir, de->d_name, &st );
+            if (!initial && entry)
+            {
+                filter = change_poll_name_filter( &st ) | FILE_NOTIFY_CHANGE_CREATION;
+                change_poll_notify( dir, FILE_ACTION_ADDED, filter, de->d_name );
+            }
+            continue;
+        }
+
+        entry->seen = 1;
+        filter = change_poll_modified_filter( &entry->st, &st );
+        if (!initial && filter) change_poll_notify( dir, FILE_ACTION_MODIFIED, filter, de->d_name );
+        entry->st = st;
+    }
+
+    closedir( unix_dir );
+    free( path );
+
+    LIST_FOR_EACH_ENTRY_SAFE( entry, next, &dir->poll_entries, struct change_poll_entry, entry )
+    {
+        if (entry->seen) continue;
+        if (!initial) change_poll_notify( dir, FILE_ACTION_REMOVED,
+                                          change_poll_name_filter( &entry->st ), entry->name );
+        list_remove( &entry->entry );
+        free( entry->name );
+        free( entry );
+    }
+}
+
+static void change_poll_callback( void *private )
+{
+    struct dir *dir;
+
+    (void)private;
+    change_poll_timer = NULL;
+
+    LIST_FOR_EACH_ENTRY( dir, &change_list, struct dir, entry )
+        if (dir->filter)
+            change_poll_scan_dir( dir, 0 );
+
+    if (!list_empty( &change_list ))
+        change_poll_timer = add_timeout_user( CHANGE_POLL_INTERVAL, change_poll_callback, NULL );
+}
+
+static void change_poll_adjust_changes( struct dir *dir )
+{
+    if (list_empty( &dir->poll_entries ))
+    {
+        change_poll_scan_dir( dir, 1 );
+    }
+
+    if (!change_poll_timer)
+        change_poll_timer = add_timeout_user( CHANGE_POLL_INTERVAL, change_poll_callback, NULL );
+}
+
+#else
+
+static void change_poll_free_entries( struct dir *dir )
+{
+    (void)dir;
+}
+
+static void change_poll_adjust_changes( struct dir *dir )
+{
+    (void)dir;
+}
+
+#endif
+
 static struct fd *dir_get_fd( struct object *obj )
 {
     struct dir *dir = (struct dir *)obj;
@@ -443,6 +670,7 @@ static void dir_destroy( struct object *obj )
 
     while ((record = get_first_change_record( dir ))) free( record );
 
+    change_poll_free_entries( dir );
     release_dir_cache_entry( dir );
     release_object( dir->fd );
 
@@ -451,6 +679,13 @@ static void dir_destroy( struct object *obj )
         release_object( inotify_fd );
         inotify_fd = NULL;
     }
+#if defined(__APPLE__) && !defined(HAVE_SYS_INOTIFY_H)
+    if (change_poll_timer && list_empty( &change_list ))
+    {
+        remove_timeout_user( change_poll_timer );
+        change_poll_timer = NULL;
+    }
+#endif
 }
 
 static struct list *dir_get_kernel_obj_list( struct object *obj )
@@ -1161,6 +1396,9 @@ struct object *create_dir_obj( struct fd *fd, unsigned int access, mode_t mode )
     dir->uid  = ~(uid_t)0;
     dir->client_process = NULL;
     set_fd_user( fd, &dir_fd_ops, &dir->obj );
+#if defined(__APPLE__) && !defined(HAVE_SYS_INOTIFY_H)
+    list_init( &dir->poll_entries );
+#endif
 
     dir_add_to_existing_notify( dir );
 
@@ -1230,6 +1468,8 @@ DECL_HANDLER(read_directory_changes)
     /* setup the real notification */
     if (!inotify_adjust_changes( dir ))
         dnotify_adjust_changes( dir );
+    /* Epic install commandlets need directory-change progress on macOS, where inotify is absent. */
+    change_poll_adjust_changes( dir );
 
     set_error(STATUS_PENDING);
 

@@ -51,6 +51,110 @@ static HANDLE job_object, job_completion_port;
 
 static const BOOL is_win64 = (sizeof(void *) > sizeof(int));
 
+static BOOL wcsistr( const WCHAR *str, const WCHAR *substr )
+{
+    SIZE_T len = lstrlenW( substr );
+
+    if (!len) return TRUE;
+    for (; *str; str++)
+        if (!wcsnicmp( str, substr, len ))
+            return TRUE;
+    return FALSE;
+}
+
+static BOOL env_var_name_matches( const WCHAR *entry, const WCHAR *name )
+{
+    SIZE_T len = lstrlenW( name );
+
+    return !wcsnicmp( entry, name, len ) && entry[len] == '=';
+}
+
+static const WCHAR *find_service_arg_value( DWORD argc, LPCWSTR *argv, const WCHAR *prefix )
+{
+    SIZE_T len = lstrlenW( prefix );
+    DWORD i;
+
+    for (i = 0; i < argc; i++)
+        if (argv[i] && !wcsnicmp( argv[i], prefix, len ))
+            return argv[i] + len;
+    return NULL;
+}
+
+static void *clone_environment_with_var( const void *base_env, const WCHAR *name, const WCHAR *value )
+{
+    const WCHAR *src, *entry;
+    WCHAR *env, *dst;
+    SIZE_T name_len = lstrlenW( name ), value_len = lstrlenW( value ), len, total = 1;
+
+    if (base_env)
+    {
+        src = base_env;
+        while (*src)
+        {
+            len = lstrlenW( src ) + 1;
+            if (!env_var_name_matches( src, name )) total += len;
+            src += len;
+        }
+    }
+
+    total += name_len + 1 + value_len + 1;
+    if (!(env = malloc( total * sizeof(WCHAR) ))) return NULL;
+
+    dst = env;
+    if (base_env)
+    {
+        entry = base_env;
+        while (*entry)
+        {
+            len = lstrlenW( entry ) + 1;
+            if (!env_var_name_matches( entry, name ))
+            {
+                memcpy( dst, entry, len * sizeof(WCHAR) );
+                dst += len;
+            }
+            entry += len;
+        }
+    }
+
+    memcpy( dst, name, name_len * sizeof(WCHAR) );
+    dst += name_len;
+    *dst++ = '=';
+    memcpy( dst, value, value_len * sizeof(WCHAR) );
+    dst += value_len;
+    *dst++ = 0;
+    *dst = 0;
+
+    return env;
+}
+
+/*
+ * WineForge launcher-compat: pass Epic's EOS session GUID to the service host.
+ * WineForge-Internal: launcher-compat/epic-launcher-v1.
+ * WineForge-Feature: launcher-compat/epic-eosh-session-env-v1.
+ */
+static void *get_service_process_environment( const WCHAR *path, DWORD service_argc, LPCWSTR *service_argv,
+                                              void **free_env )
+{
+    static const WCHAR eosh_hostW[] = L"EpicOnlineServicesHost.exe";
+    static const WCHAR client_idW[] = L"--clientId=";
+    static const WCHAR eos_session_guidW[] = L"EOS_SESSION_GUID";
+    const WCHAR *client_id;
+
+    *free_env = NULL;
+
+    if (!path || !wcsistr( path, eosh_hostW )) return environment;
+    if (!(client_id = find_service_arg_value( service_argc, service_argv, client_idW ))) return environment;
+
+    if ((*free_env = clone_environment_with_var( environment, eos_session_guidW, client_id )))
+    {
+        WINE_TRACE( "setting EOS_SESSION_GUID for EpicOnlineServicesHost service process\n" );
+        return *free_env;
+    }
+
+    WINE_WARN( "failed to allocate EpicOnlineServicesHost service environment\n" );
+    return environment;
+}
+
 static DWORD process_create(const WCHAR *name, struct process_entry **entry)
 {
     DWORD err;
@@ -913,7 +1017,7 @@ error:
 }
 
 static DWORD service_start_process(struct service_entry *service_entry, struct process_entry **new_process,
-                                   BOOL *shared_process)
+                                   BOOL *shared_process, DWORD service_argc, LPCWSTR *service_argv)
 {
     struct process_entry *process;
     PROCESS_INFORMATION pi;
@@ -921,6 +1025,7 @@ static DWORD service_start_process(struct service_entry *service_entry, struct p
     BOOL is_wow64 = FALSE;
     HANDLE token;
     WCHAR *path;
+    void *process_environment, *free_environment;
     DWORD err;
     BOOL r;
 
@@ -1056,7 +1161,11 @@ found:
     process->use_count++;
     service_unlock(service_entry);
 
-    r = CreateProcessW(NULL, path, NULL, NULL, FALSE, CREATE_UNICODE_ENVIRONMENT | DETACHED_PROCESS, environment, NULL, &si, &pi);
+    /* Epic EOSH passes the service session id as --clientId; mirror it into the host environment. */
+    process_environment = get_service_process_environment( path, service_argc, service_argv, &free_environment );
+    r = CreateProcessW(NULL, path, NULL, NULL, FALSE, CREATE_UNICODE_ENVIRONMENT | DETACHED_PROCESS,
+                       process_environment, NULL, &si, &pi);
+    free(free_environment);
     free(path);
     if (!r)
     {
@@ -1160,7 +1269,7 @@ DWORD service_start(struct service_entry *service, DWORD service_argc, LPCWSTR *
     BOOL shared_process;
     DWORD err;
 
-    err = service_start_process(service, &process, &shared_process);
+    err = service_start_process(service, &process, &shared_process, service_argc, service_argv);
     if (err == ERROR_SUCCESS)
     {
         err = process_send_start_message(process, shared_process, service->name, service_argv, service_argc);

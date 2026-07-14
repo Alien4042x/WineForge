@@ -37,6 +37,812 @@ WINE_DECLARE_DEBUG_CHANNEL(winediag);
 
 #define u64_from_user_ptr(ptr) ((ULONGLONG)(uintptr_t)(ptr))
 
+/* WineForge launcher-compat: Epic EOSH MainService install progress shim.
+ * WineForge-Internal: launcher-compat/epic-launcher-v1.
+ * WineForge-Feature: launcher-compat/epic-eosh-mainservice-progress-v1.
+ *
+ * only Epic processes and localhost MainService ports are considered. */
+#define EPIC_EOSH_MIN_PORT 35783
+#define EPIC_EOSH_MAX_PORT 35791
+#define EPIC_EOSH_TRACKED_SOCKETS 128
+#define EPIC_EOSH_OPERATION_ID_MAX 96
+#define EPIC_EOSH_OPERATION_TYPE_MAX 32
+#define EPIC_EOSH_PROGRESS_JSON_MAX 8192
+#define EPIC_EOSH_PROGRESS_TAIL_MAX 262144
+
+enum epic_eosh_request_type
+{
+    EPIC_EOSH_REQUEST_NONE,
+    EPIC_EOSH_REQUEST_GET_OPERATIONS,
+    EPIC_EOSH_REQUEST_GET_INSTALLATIONS,
+    EPIC_EOSH_REQUEST_POST_INSTALL_OPERATION,
+};
+
+static SOCKET epic_eosh_tracked_sockets[EPIC_EOSH_TRACKED_SOCKETS];
+static enum epic_eosh_request_type epic_eosh_socket_request_type[EPIC_EOSH_TRACKED_SOCKETS];
+static char epic_eosh_active_operation_id[EPIC_EOSH_OPERATION_ID_MAX];
+static char epic_eosh_active_operation_type[EPIC_EOSH_OPERATION_TYPE_MAX] = "install";
+static ULONGLONG epic_eosh_active_operation_started;
+static char epic_eosh_progress_json[EPIC_EOSH_PROGRESS_JSON_MAX];
+static char epic_eosh_progress_state[32];
+static char epic_eosh_progress_update[48] = "0.01";
+
+static BOOL epic_eosh_is_epic_process(void)
+{
+    static int cached;
+    static const WCHAR launcherW[] = L"EpicGamesLauncher.exe";
+    static const WCHAR hostW[] = L"EpicOnlineServicesHost.exe";
+    static const WCHAR helperW[] = L"EpicWebHelper.exe";
+    WCHAR image[MAX_PATH], *name;
+    DWORD len;
+
+    if (cached) return cached > 0;
+
+    if (!(len = GetModuleFileNameW( 0, image, ARRAY_SIZE(image) )) || len >= ARRAY_SIZE(image))
+    {
+        cached = -1;
+        return FALSE;
+    }
+
+    name = image;
+    if ((name = wcsrchr( image, '\\' ))) name++;
+    else if ((name = wcsrchr( image, '/' ))) name++;
+    else name = image;
+
+    cached = (!wcsicmp( name, launcherW ) || !wcsicmp( name, hostW ) || !wcsicmp( name, helperW )) ? 1 : -1;
+    return cached > 0;
+}
+
+static unsigned short epic_eosh_ntohs( unsigned short value )
+{
+    return (value >> 8) | (value << 8);
+}
+
+static unsigned short epic_eosh_sockaddr_port( const struct sockaddr *addr )
+{
+    if (!addr) return 0;
+    if (addr->sa_family == AF_INET)
+        return epic_eosh_ntohs( ((const struct sockaddr_in *)addr)->sin_port );
+    if (addr->sa_family == AF_INET6)
+        return epic_eosh_ntohs( ((const struct sockaddr_in6 *)addr)->sin6_port );
+    return 0;
+}
+
+static void epic_eosh_socket_ports( SOCKET s, unsigned short *local_port, unsigned short *peer_port )
+{
+    struct sockaddr_storage addr;
+    int len = sizeof(addr);
+
+    *local_port = *peer_port = 0;
+    if (!getsockname( s, (struct sockaddr *)&addr, &len ))
+        *local_port = epic_eosh_sockaddr_port( (struct sockaddr *)&addr );
+    len = sizeof(addr);
+    if (!getpeername( s, (struct sockaddr *)&addr, &len ))
+        *peer_port = epic_eosh_sockaddr_port( (struct sockaddr *)&addr );
+}
+
+static BOOL epic_eosh_is_port( unsigned short port )
+{
+    return port >= EPIC_EOSH_MIN_PORT && port <= EPIC_EOSH_MAX_PORT;
+}
+
+static BOOL epic_eosh_is_socket_tracked( SOCKET s )
+{
+    unsigned int i;
+
+    for (i = 0; i < ARRAY_SIZE(epic_eosh_tracked_sockets); ++i)
+        if (epic_eosh_tracked_sockets[i] == s) return TRUE;
+    return FALSE;
+}
+
+static unsigned int epic_eosh_track_socket( SOCKET s )
+{
+    unsigned int i, slot = (ULONG_PTR)s % ARRAY_SIZE(epic_eosh_tracked_sockets);
+
+    for (i = 0; i < ARRAY_SIZE(epic_eosh_tracked_sockets); ++i)
+    {
+        unsigned int idx = (slot + i) % ARRAY_SIZE(epic_eosh_tracked_sockets);
+        if (epic_eosh_tracked_sockets[idx] == s) return idx;
+    }
+    for (i = 0; i < ARRAY_SIZE(epic_eosh_tracked_sockets); ++i)
+    {
+        unsigned int idx = (slot + i) % ARRAY_SIZE(epic_eosh_tracked_sockets);
+        if (!epic_eosh_tracked_sockets[idx])
+        {
+            epic_eosh_tracked_sockets[idx] = s;
+            epic_eosh_socket_request_type[idx] = EPIC_EOSH_REQUEST_NONE;
+            return idx;
+        }
+    }
+    epic_eosh_tracked_sockets[slot] = s;
+    epic_eosh_socket_request_type[slot] = EPIC_EOSH_REQUEST_NONE;
+    return slot;
+}
+
+static void epic_eosh_set_socket_request_type( SOCKET s, enum epic_eosh_request_type type )
+{
+    epic_eosh_socket_request_type[epic_eosh_track_socket( s )] = type;
+}
+
+static enum epic_eosh_request_type epic_eosh_get_socket_request_type( SOCKET s )
+{
+    unsigned int i;
+
+    for (i = 0; i < ARRAY_SIZE(epic_eosh_tracked_sockets); ++i)
+        if (epic_eosh_tracked_sockets[i] == s) return epic_eosh_socket_request_type[i];
+    return EPIC_EOSH_REQUEST_NONE;
+}
+
+static const char *epic_eosh_memmem( const char *buf, DWORD len, const char *needle, size_t needle_len )
+{
+    DWORD i;
+
+    if (!needle_len || len < needle_len) return NULL;
+    for (i = 0; i + needle_len <= len; ++i)
+        if (!memcmp( buf + i, needle, needle_len )) return buf + i;
+    return NULL;
+}
+
+static BOOL epic_eosh_request_line( const char *buf, int len, char *line, size_t line_size )
+{
+    int i, copy;
+
+    if (len < 5) return FALSE;
+    if (memcmp( buf, "GET ", 4 ) && memcmp( buf, "POST ", 5 ) &&
+        memcmp( buf, "DELETE ", 7 ) && memcmp( buf, "PATCH ", 6 )) return FALSE;
+
+    for (i = 0; i < len && i < 512; ++i)
+        if (buf[i] == '\n' || buf[i] == '\r') break;
+    copy = min( i, (int)line_size - 1 );
+    memcpy( line, buf, copy );
+    line[copy] = 0;
+    return TRUE;
+}
+
+static int epic_eosh_headers_len( const char *buf, int len )
+{
+    int i;
+
+    for (i = 0; i + 3 < len && i < 4096; ++i)
+        if (buf[i] == '\r' && buf[i + 1] == '\n' && buf[i + 2] == '\r' && buf[i + 3] == '\n')
+            return i + 4;
+    return 0;
+}
+
+static BOOL epic_eosh_interesting_request( const char *line )
+{
+    return strstr( line, " /api/v1/installation/" ) != NULL;
+}
+
+static BOOL epic_eosh_operations_request( const char *line )
+{
+    return strstr( line, " /api/v1/installation/operations" ) != NULL ||
+           strstr( line, " /api/v1/installation/installations" ) != NULL;
+}
+
+static BOOL epic_eosh_operations_poll_request( const char *line )
+{
+    return !memcmp( line, "GET /api/v1/installation/operations ", 36 );
+}
+
+static BOOL epic_eosh_installations_poll_request( const char *line )
+{
+    return !memcmp( line, "GET /api/v1/installation/installations ", 39 );
+}
+
+static BOOL epic_eosh_install_operation_request( const char *line )
+{
+    return !memcmp( line, "POST /api/v1/installation/operations/install ", 45 );
+}
+
+static BOOL epic_eosh_match_header_name( const char *line, int len, const char *name )
+{
+    unsigned int i, name_len = strlen(name);
+
+    if (len < name_len) return FALSE;
+    for (i = 0; i < name_len; ++i)
+    {
+        char a = line[i], b = name[i];
+        if (a >= 'A' && a <= 'Z') a += 'a' - 'A';
+        if (b >= 'A' && b <= 'Z') b += 'a' - 'A';
+        if (a != b) return FALSE;
+    }
+    return TRUE;
+}
+
+static BOOL epic_eosh_strip_if_none_match( SOCKET s, WSABUF *buffers, DWORD buffer_count,
+                                           WSABUF *modified, char **modified_buf, DWORD *original_len )
+{
+    unsigned short local_port, peer_port;
+    const char *buf, *remove_start = NULL, *remove_end = NULL;
+    char line[640];
+    int len, headers_len, pos = 0, new_len;
+
+    *modified_buf = NULL;
+    *original_len = 0;
+
+    /* Epic MainService may return cached empty operations/installations; force a fresh response. */
+    if (buffer_count != 1 || !buffers || !buffers[0].buf || !buffers[0].len) return FALSE;
+    if (!epic_eosh_is_epic_process()) return FALSE;
+
+    epic_eosh_socket_ports( s, &local_port, &peer_port );
+    if (!epic_eosh_is_port( local_port ) && !epic_eosh_is_port( peer_port )) return FALSE;
+
+    buf = buffers[0].buf;
+    len = buffers[0].len;
+    if (!epic_eosh_request_line( buf, len, line, sizeof(line) )) return FALSE;
+    if (!epic_eosh_operations_poll_request( line ) && !epic_eosh_installations_poll_request( line )) return FALSE;
+    if (!(headers_len = epic_eosh_headers_len( buf, len ))) return FALSE;
+
+    while (pos < headers_len)
+    {
+        int start = pos, line_len;
+
+        while (pos < headers_len && buf[pos] != '\r' && buf[pos] != '\n') pos++;
+        line_len = pos - start;
+        while (pos < headers_len && (buf[pos] == '\r' || buf[pos] == '\n')) pos++;
+
+        if (epic_eosh_match_header_name( buf + start, line_len, "If-None-Match:" ))
+        {
+            remove_start = buf + start;
+            remove_end = buf + pos;
+            break;
+        }
+        if (!line_len) break;
+    }
+
+    if (!remove_start || remove_end <= remove_start) return FALSE;
+
+    new_len = len - (remove_end - remove_start);
+    if (!(*modified_buf = HeapAlloc( GetProcessHeap(), 0, new_len ))) return FALSE;
+
+    memcpy( *modified_buf, buf, remove_start - buf );
+    memcpy( *modified_buf + (remove_start - buf), remove_end, (buf + len) - remove_end );
+
+    *modified = buffers[0];
+    modified->buf = *modified_buf;
+    modified->len = new_len;
+    *original_len = len;
+
+    return TRUE;
+}
+
+static BOOL epic_eosh_extract_json_string( const char *buf, DWORD len, const char *key, char *out, size_t out_size )
+{
+    const char *end = buf + len, *pos = buf;
+    size_t key_len = strlen(key);
+
+    while (pos + key_len < end)
+    {
+        if (!memcmp( pos, key, key_len ))
+        {
+            const char *value = pos + key_len;
+            size_t copy = 0;
+
+            while (value < end && (*value == ' ' || *value == ':' || *value == '"')) value++;
+            while (value < end && *value != '"' && *value != ',' && *value != '}' && copy + 1 < out_size)
+                out[copy++] = *value++;
+            out[copy] = 0;
+            return copy != 0;
+        }
+        pos++;
+    }
+    return FALSE;
+}
+
+static ULONGLONG epic_eosh_operation_timestamp( const char *operation_id )
+{
+    ULONGLONG value = 0;
+    const char *p;
+
+    if (memcmp( operation_id, "op-", 3 )) return GetTickCount64();
+    for (p = operation_id + 3; *p >= '0' && *p <= '9'; ++p)
+        value = value * 10 + (*p - '0');
+    return value ? value : GetTickCount64();
+}
+
+static BOOL epic_eosh_extract_counter( const char *buf, DWORD len, const char *key, unsigned int *value )
+{
+    const char *end = buf + len, *pos;
+    size_t key_len = strlen(key);
+    unsigned int ret = 0;
+
+    if (!(pos = epic_eosh_memmem( buf, len, key, key_len ))) return FALSE;
+    pos += key_len;
+    while (pos < end && (*pos == ' ' || *pos == ':')) pos++;
+    if (pos >= end || *pos < '0' || *pos > '9') return FALSE;
+    while (pos < end && *pos >= '0' && *pos <= '9')
+    {
+        ret = ret * 10 + (*pos - '0');
+        pos++;
+    }
+    *value = ret;
+    return TRUE;
+}
+
+static BOOL epic_eosh_extract_json_number( const char *buf, DWORD len, const char *key, char *out, size_t out_size )
+{
+    const char *end = buf + len, *pos;
+    size_t key_len = strlen(key), copy = 0;
+
+    if (!(pos = epic_eosh_memmem( buf, len, key, key_len ))) return FALSE;
+    pos += key_len;
+    while (pos < end && (*pos == ' ' || *pos == ':')) pos++;
+    if (pos >= end || ((*pos < '0' || *pos > '9') && *pos != '-' && *pos != '.')) return FALSE;
+    while (pos < end && ((*pos >= '0' && *pos <= '9') || *pos == '-' || *pos == '.' ||
+                         *pos == 'e' || *pos == 'E' || *pos == '+') && copy + 1 < out_size)
+        out[copy++] = *pos++;
+    out[copy] = 0;
+    return copy != 0;
+}
+
+static BOOL epic_eosh_copy_json_object( const char *buf, DWORD len, char *out, size_t out_size )
+{
+    DWORD i;
+    int depth = 0;
+    BOOL in_string = FALSE, escaped = FALSE;
+
+    if (!len || buf[0] != '{' || out_size < 2) return FALSE;
+
+    for (i = 0; i < len; ++i)
+    {
+        char ch = buf[i];
+
+        if (in_string)
+        {
+            if (escaped) escaped = FALSE;
+            else if (ch == '\\') escaped = TRUE;
+            else if (ch == '"') in_string = FALSE;
+            continue;
+        }
+
+        if (ch == '"') in_string = TRUE;
+        else if (ch == '{') depth++;
+        else if (ch == '}' && --depth == 0)
+        {
+            DWORD copy = i + 1;
+
+            if (copy >= out_size) return FALSE;
+            memcpy( out, buf, copy );
+            out[copy] = 0;
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+static BOOL epic_eosh_extract_progress_body( const char *buf, DWORD len, char *out, size_t out_size )
+{
+    const char *pos = buf, *last = NULL, *end = buf + len;
+    static const char progress[] = "\"type\":\"progress\"";
+    static const char body[] = "\"body\"";
+
+    while (pos < end)
+    {
+        const char *next = epic_eosh_memmem( pos, end - pos, progress, strlen(progress) );
+        if (!next) break;
+        last = next;
+        pos = next + strlen(progress);
+    }
+    if (!last) return FALSE;
+    if (!(last = epic_eosh_memmem( last, end - last, body, strlen(body) ))) return FALSE;
+    last += strlen(body);
+    while (last < end && (*last == ' ' || *last == ':')) last++;
+    if (last >= end || *last != '{') return FALSE;
+
+    return epic_eosh_copy_json_object( last, end - last, out, out_size );
+}
+
+static BOOL epic_eosh_read_progress_from_log( const char *path, char *out, size_t out_size )
+{
+    HANDLE file;
+    DWORD file_size, offset = 0, read = 0, tail_size;
+    char *tail;
+    BOOL ret = FALSE;
+
+    file = CreateFileA( path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                        NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL );
+    if (file == INVALID_HANDLE_VALUE) return FALSE;
+
+    file_size = GetFileSize( file, NULL );
+    if (file_size < 32) goto done;
+    tail_size = min( file_size, (DWORD)EPIC_EOSH_PROGRESS_TAIL_MAX );
+    offset = file_size - tail_size;
+    if (!(tail = HeapAlloc( GetProcessHeap(), 0, tail_size + 1 ))) goto done;
+    SetFilePointer( file, offset, NULL, FILE_BEGIN );
+    if (ReadFile( file, tail, tail_size, &read, NULL ) && read)
+    {
+        tail[read] = 0;
+        ret = epic_eosh_extract_progress_body( tail, read, out, out_size );
+    }
+    HeapFree( GetProcessHeap(), 0, tail );
+
+done:
+    CloseHandle( file );
+    return ret;
+}
+
+static BOOL epic_eosh_refresh_progress_from_logs(void)
+{
+    static const char dir[] = "C:\\ProgramData\\Epic\\EpicOnlineServices\\InstallHelper\\Logs\\";
+    char pattern[MAX_PATH], path[MAX_PATH], progress[EPIC_EOSH_PROGRESS_JSON_MAX];
+    WIN32_FIND_DATAA data, best_data;
+    HANDLE find;
+    BOOL found = FALSE;
+
+    snprintf( pattern, sizeof(pattern), "%sInstallHelper-*.log", dir );
+    find = FindFirstFileA( pattern, &data );
+    if (find == INVALID_HANDLE_VALUE) return FALSE;
+
+    do
+    {
+        if (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+        snprintf( path, sizeof(path), "%s%s", dir, data.cFileName );
+        if (!epic_eosh_read_progress_from_log( path, progress, sizeof(progress) )) continue;
+        if (!found || CompareFileTime( &data.ftLastWriteTime, &best_data.ftLastWriteTime ) > 0)
+        {
+            best_data = data;
+            lstrcpynA( epic_eosh_progress_json, progress, sizeof(epic_eosh_progress_json) );
+            found = TRUE;
+        }
+    } while (FindNextFileA( find, &data ));
+
+    FindClose( find );
+    if (!found) return FALSE;
+
+    if (!epic_eosh_extract_json_string( epic_eosh_progress_json, strlen(epic_eosh_progress_json),
+                                        "\"state\"", epic_eosh_progress_state,
+                                        sizeof(epic_eosh_progress_state) ))
+        epic_eosh_progress_state[0] = 0;
+    if (!epic_eosh_extract_json_number( epic_eosh_progress_json, strlen(epic_eosh_progress_json),
+                                        "\"updateProgress\"", epic_eosh_progress_update,
+                                        sizeof(epic_eosh_progress_update) ))
+        lstrcpynA( epic_eosh_progress_update, "0.01", sizeof(epic_eosh_progress_update) );
+
+    return TRUE;
+}
+
+static const char *epic_eosh_detect_operation_type( const char *buf, DWORD len )
+{
+    if (epic_eosh_memmem( buf, len, "\"type\":\"Uninstall\"", 18 ) ||
+        epic_eosh_memmem( buf, len, "\"type\": \"Uninstall\"", 19 ))
+        return "uninstall";
+    if (epic_eosh_memmem( buf, len, "\"type\":\"Repair\"", 15 ) ||
+        epic_eosh_memmem( buf, len, "\"type\": \"Repair\"", 16 ))
+        return "repair";
+    return "install";
+}
+
+static BOOL epic_eosh_buffer_mentions_operation_type( const char *buf, DWORD len )
+{
+    return epic_eosh_memmem( buf, len, "\"type\":\"Uninstall\"", 18 ) ||
+           epic_eosh_memmem( buf, len, "\"type\": \"Uninstall\"", 19 ) ||
+           epic_eosh_memmem( buf, len, "\"type\":\"Repair\"", 15 ) ||
+           epic_eosh_memmem( buf, len, "\"type\": \"Repair\"", 16 ) ||
+           epic_eosh_memmem( buf, len, "\"type\":\"InstallOrUpdate\"", 24 ) ||
+           epic_eosh_memmem( buf, len, "\"type\": \"InstallOrUpdate\"", 25 );
+}
+
+static void epic_eosh_note_operation_type( const char *buf, DWORD len )
+{
+    const char *type = epic_eosh_detect_operation_type( buf, len );
+
+    lstrcpynA( epic_eosh_active_operation_type, type, sizeof(epic_eosh_active_operation_type) );
+}
+
+static void epic_eosh_note_operation_id( const char *buf, DWORD len )
+{
+    char operation_id[EPIC_EOSH_OPERATION_ID_MAX];
+
+    if (!epic_eosh_extract_json_string( buf, len, "\"operationId\"", operation_id, sizeof(operation_id) )) return;
+    lstrcpynA( epic_eosh_active_operation_id, operation_id, sizeof(epic_eosh_active_operation_id) );
+    epic_eosh_active_operation_started = epic_eosh_operation_timestamp( operation_id );
+}
+
+static BOOL epic_eosh_replace_operations_response( SOCKET s, char *buf, DWORD capacity, ULONG_PTR *byte_count )
+{
+    static const char headers_fmt[] =
+        "HTTP/1.1 200 OK\r\n"
+        "Vary: Origin\r\n"
+        "Content-Type: application/json; charset=utf-8\r\n"
+        "Content-Length: %u\r\n"
+        "Connection: keep-alive\r\n"
+        "Keep-Alive: timeout=5\r\n"
+        "\r\n";
+    char body[12288], response[12800];
+    const char *status;
+    const char *progress_json = NULL;
+    const char *summary;
+    ULONGLONG started = epic_eosh_active_operation_started;
+    unsigned int running = 0, completed = 0;
+    int body_len, response_len;
+
+    /* Epic launcher loses the active op id while EOSH/InstallHelper continues; synthesize that op back. */
+    if (!epic_eosh_active_operation_id[0]) return FALSE;
+    if (!epic_eosh_memmem( buf, *byte_count, "HTTP/1.1 200 OK", 15 )) return FALSE;
+    if (!epic_eosh_memmem( buf, *byte_count, "\"queued\":[]", 10 ) ||
+        !epic_eosh_memmem( buf, *byte_count, "\"running\":[]", 12 ) ||
+        !epic_eosh_memmem( buf, *byte_count, "\"completed\":[]", 14 )) return FALSE;
+    if (!(summary = epic_eosh_memmem( buf, *byte_count, "\"globalSummary\"", 15 ))) return FALSE;
+    if (!epic_eosh_extract_counter( summary, (buf + *byte_count) - summary, "\"running\"", &running ))
+        running = 0;
+    if (!epic_eosh_extract_counter( summary, (buf + *byte_count) - summary, "\"completed\"", &completed ))
+        completed = 0;
+    if (!running && !completed) return FALSE;
+
+    if (!started) started = GetTickCount64();
+    status = running ? "Running" : "Completed";
+    if (epic_eosh_refresh_progress_from_logs())
+        progress_json = epic_eosh_progress_json;
+
+    if (!strcmp( status, "Running" ))
+    {
+        if (progress_json)
+            body_len = snprintf( body, sizeof(body),
+                "{\"queued\":[],\"running\":[{\"id\":\"%s\",\"request\":{\"type\":\"%s\",\"body\":{}},"
+                "\"progress\":%s,\"status\":\"Running\",\"startedAt\":%llu,\"queuedAt\":%llu}],"
+                "\"suspended\":[],\"completed\":[],\"globalSummary\":{\"queued\":0,\"running\":1,"
+                "\"suspended\":0,\"completed\":0,\"executionSlots\":1}}",
+                epic_eosh_active_operation_id, epic_eosh_active_operation_type, progress_json,
+                (unsigned long long)started, (unsigned long long)started );
+        else
+            body_len = snprintf( body, sizeof(body),
+                "{\"queued\":[],\"running\":[{\"id\":\"%s\",\"request\":{\"type\":\"%s\",\"body\":{}},"
+                "\"progress\":{\"installTaskStep\":\"Bps\",\"bpsOngoingStats\":{\"state\":\"Downloading\","
+                "\"downloadHealth\":\"Excellent\",\"updateProgress\":0.01},\"bpsEndStats\":{\"errorCode\":\"OK\","
+                "\"processSuccess\":true,\"finalProgress\":0}},\"status\":\"Running\",\"startedAt\":%llu,"
+                "\"queuedAt\":%llu}],\"suspended\":[],\"completed\":[],\"globalSummary\":{\"queued\":0,"
+                "\"running\":1,\"suspended\":0,\"completed\":0,\"executionSlots\":1}}",
+                epic_eosh_active_operation_id, epic_eosh_active_operation_type,
+                (unsigned long long)started, (unsigned long long)started );
+    }
+    else
+    {
+        if (progress_json)
+            body_len = snprintf( body, sizeof(body),
+                "{\"queued\":[],\"running\":[],\"suspended\":[],\"completed\":[{\"id\":\"%s\","
+                "\"request\":{\"type\":\"%s\",\"body\":{}},\"progress\":%s,\"status\":\"Completed\","
+                "\"startedAt\":%llu,\"queuedAt\":%llu}],\"globalSummary\":{\"queued\":0,\"running\":0,"
+                "\"suspended\":0,\"completed\":1,\"executionSlots\":1}}",
+                epic_eosh_active_operation_id, epic_eosh_active_operation_type, progress_json,
+                (unsigned long long)started, (unsigned long long)started );
+        else
+            body_len = snprintf( body, sizeof(body),
+                "{\"queued\":[],\"running\":[],\"suspended\":[],\"completed\":[{\"id\":\"%s\","
+                "\"request\":{\"type\":\"%s\",\"body\":{}},\"progress\":{\"installTaskStep\":\"Bps\","
+                "\"bpsOngoingStats\":{\"state\":\"Completed\",\"downloadHealth\":\"Excellent\",\"updateProgress\":1.0},"
+                "\"bpsEndStats\":{\"errorCode\":\"OK\",\"processSuccess\":true,\"finalProgress\":1.0}},"
+                "\"status\":\"Completed\",\"startedAt\":%llu,\"queuedAt\":%llu}],\"globalSummary\":{\"queued\":0,"
+                "\"running\":0,\"suspended\":0,\"completed\":1,\"executionSlots\":1}}",
+                epic_eosh_active_operation_id, epic_eosh_active_operation_type,
+                (unsigned long long)started, (unsigned long long)started );
+    }
+
+    if (body_len <= 0 || body_len >= sizeof(body)) return FALSE;
+    response_len = snprintf( response, sizeof(response), headers_fmt, body_len );
+    if (response_len <= 0 || response_len + body_len >= sizeof(response)) return FALSE;
+    memcpy( response + response_len, body, body_len );
+    response_len += body_len;
+    if (response_len > capacity) return FALSE;
+
+    memcpy( buf, response, response_len );
+    *byte_count = response_len;
+    return TRUE;
+}
+
+static BOOL epic_eosh_append_egi_installation( char *body, DWORD body_size, DWORD *body_len,
+                                               const char *path, DWORD *count, char *revision,
+                                               size_t revision_size )
+{
+    HANDLE file;
+    DWORD size, file_size, read, start = *body_len;
+    char egi_revision[64];
+    char *file_buf, *v4, *end;
+    BOOL ret = FALSE;
+
+    /* Epic InstallHelper .egi files are authoritative when MainService loses installed-state cache. */
+    file = CreateFileA( path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                        NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL );
+    if (file == INVALID_HANDLE_VALUE) return FALSE;
+
+    file_size = GetFileSize( file, NULL );
+    if (file_size < 16 || file_size > 32768) goto done;
+    if (!(file_buf = HeapAlloc( GetProcessHeap(), 0, file_size + 1 ))) goto done;
+
+    if (!ReadFile( file, file_buf, file_size, &read, NULL ) || read != file_size)
+    {
+        HeapFree( GetProcessHeap(), 0, file_buf );
+        goto done;
+    }
+    file_buf[file_size] = 0;
+
+    v4 = strstr( file_buf, "{\"v4\":" );
+    end = file_buf + file_size;
+    if (!v4 || end <= v4 + 7 || end[-1] != '}')
+    {
+        HeapFree( GetProcessHeap(), 0, file_buf );
+        goto done;
+    }
+
+    if (*count)
+    {
+        if (*body_len + 1 >= body_size)
+        {
+            HeapFree( GetProcessHeap(), 0, file_buf );
+            goto done;
+        }
+        body[(*body_len)++] = ',';
+    }
+
+    size = end - (v4 + 6) - 1;
+    if (*body_len + size >= body_size)
+    {
+        *body_len = start;
+        HeapFree( GetProcessHeap(), 0, file_buf );
+        goto done;
+    }
+
+    memcpy( body + *body_len, v4 + 6, size );
+    *body_len += size;
+    (*count)++;
+    if (revision_size &&
+        epic_eosh_extract_json_string( file_buf, file_size, "\"revision\"", egi_revision, sizeof(egi_revision) ))
+    {
+        if (!revision[0] || strcmp( egi_revision, revision ) > 0)
+            lstrcpynA( revision, egi_revision, revision_size );
+    }
+    ret = TRUE;
+    HeapFree( GetProcessHeap(), 0, file_buf );
+
+done:
+    CloseHandle( file );
+    return ret;
+}
+
+static BOOL epic_eosh_build_installations_body( char *body, DWORD body_size, DWORD *body_len,
+                                                DWORD *count, char *revision, size_t revision_size )
+{
+    static const char dir[] = "C:\\ProgramData\\Epic\\EpicOnlineServices\\InstallHelper\\InstalledItems\\";
+    char pattern[MAX_PATH], path[MAX_PATH];
+    WIN32_FIND_DATAA data;
+    HANDLE find;
+
+    *body_len = snprintf( body, body_size, "{\"installations\":[" );
+    if (!*body_len || *body_len >= body_size) return FALSE;
+    *count = 0;
+    if (revision_size) revision[0] = 0;
+
+    snprintf( pattern, sizeof(pattern), "%s*.egi", dir );
+    find = FindFirstFileA( pattern, &data );
+    if (find == INVALID_HANDLE_VALUE) return FALSE;
+
+    do
+    {
+        if (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+        snprintf( path, sizeof(path), "%s%s", dir, data.cFileName );
+        epic_eosh_append_egi_installation( body, body_size, body_len, path, count, revision, revision_size );
+    } while (FindNextFileA( find, &data ));
+
+    FindClose( find );
+    if (*body_len + 64 >= body_size) return FALSE;
+    *body_len += snprintf( body + *body_len, body_size - *body_len,
+                           "],\"globalSummary\":{\"total\":%lu}}", *count );
+    return *count != 0 && revision[0] && *body_len < body_size;
+}
+
+static BOOL epic_eosh_replace_installations_response( SOCKET s, char *buf, DWORD capacity, ULONG_PTR *byte_count )
+{
+    static const char headers_fmt[] =
+        "HTTP/1.1 200 OK\r\n"
+        "Vary: Origin\r\n"
+        "etag: %s\r\n"
+        "Content-Type: application/json; charset=utf-8\r\n"
+        "Content-Length: %lu\r\n"
+        "Connection: keep-alive\r\n"
+        "Keep-Alive: timeout=5\r\n"
+        "\r\n";
+    char *body, *response;
+    char revision[64];
+    DWORD body_len, count;
+    int header_len;
+    BOOL ret = FALSE;
+
+    if (!epic_eosh_memmem( buf, *byte_count, "HTTP/1.1 200 OK", 15 )) return FALSE;
+    if (!epic_eosh_memmem( buf, *byte_count, "\"installations\":[", 17 )) return FALSE;
+    if (!epic_eosh_memmem( buf, *byte_count, "\"globalSummary\"", 15 )) return FALSE;
+
+    if (!(body = HeapAlloc( GetProcessHeap(), HEAP_ZERO_MEMORY, 49152 ))) return FALSE;
+    if (!(response = HeapAlloc( GetProcessHeap(), HEAP_ZERO_MEMORY, 65536 )))
+    {
+        HeapFree( GetProcessHeap(), 0, body );
+        return FALSE;
+    }
+
+    if (!epic_eosh_build_installations_body( body, 49152, &body_len, &count, revision, sizeof(revision) )) goto done;
+    header_len = snprintf( response, 65536, headers_fmt, revision, body_len );
+    if (header_len <= 0 || header_len + body_len > capacity || header_len + body_len >= 65536) goto done;
+    memcpy( response + header_len, body, body_len );
+    memcpy( buf, response, header_len + body_len );
+    *byte_count = header_len + body_len;
+
+    ret = TRUE;
+
+done:
+    HeapFree( GetProcessHeap(), 0, response );
+    HeapFree( GetProcessHeap(), 0, body );
+    return ret;
+}
+
+static void epic_eosh_maybe_shim_http_response( SOCKET s, WSABUF *buffers, DWORD buffer_count, ULONG_PTR *byte_count )
+{
+    enum epic_eosh_request_type type;
+    DWORD len;
+
+    if (!buffer_count || !buffers || !buffers[0].buf || !byte_count || !*byte_count) return;
+    if (!epic_eosh_is_epic_process()) return;
+    if (!epic_eosh_is_socket_tracked( s )) return;
+
+    len = min( buffers[0].len, (DWORD)*byte_count );
+    type = epic_eosh_get_socket_request_type( s );
+    epic_eosh_note_operation_id( buffers[0].buf, len );
+    if (type == EPIC_EOSH_REQUEST_GET_INSTALLATIONS)
+    {
+        epic_eosh_replace_installations_response( s, buffers[0].buf, buffers[0].len, byte_count );
+        epic_eosh_set_socket_request_type( s, EPIC_EOSH_REQUEST_NONE );
+        return;
+    }
+    if (type == EPIC_EOSH_REQUEST_GET_OPERATIONS)
+    {
+        epic_eosh_replace_operations_response( s, buffers[0].buf, buffers[0].len, byte_count );
+        epic_eosh_set_socket_request_type( s, EPIC_EOSH_REQUEST_NONE );
+    }
+}
+
+static void epic_eosh_maybe_track_http( const char *direction, SOCKET s, const WSABUF *buffers,
+                                        DWORD buffer_count, DWORD byte_count )
+{
+    unsigned short local_port, peer_port;
+    char line[640];
+    const char *buf;
+    DWORD len;
+
+    if (!buffer_count || !buffers || !byte_count) return;
+    if (!epic_eosh_is_epic_process()) return;
+    epic_eosh_socket_ports( s, &local_port, &peer_port );
+    if (!epic_eosh_is_port( local_port ) && !epic_eosh_is_port( peer_port )) return;
+
+    buf = buffers[0].buf;
+    len = min( buffers[0].len, byte_count );
+    if (!buf || !len) return;
+
+    if (epic_eosh_request_line( buf, len, line, sizeof(line) ))
+    {
+        if (!epic_eosh_interesting_request( line )) return;
+        if (epic_eosh_operations_poll_request( line ))
+            epic_eosh_set_socket_request_type( s, EPIC_EOSH_REQUEST_GET_OPERATIONS );
+        else if (epic_eosh_installations_poll_request( line ))
+            epic_eosh_set_socket_request_type( s, EPIC_EOSH_REQUEST_GET_INSTALLATIONS );
+        else if (epic_eosh_install_operation_request( line ))
+        {
+            epic_eosh_set_socket_request_type( s, EPIC_EOSH_REQUEST_POST_INSTALL_OPERATION );
+            if (epic_eosh_buffer_mentions_operation_type( buf, len ))
+                epic_eosh_note_operation_type( buf, len );
+        }
+        else if (epic_eosh_operations_request( line ))
+            epic_eosh_set_socket_request_type( s, EPIC_EOSH_REQUEST_NONE );
+        return;
+    }
+
+    if (!epic_eosh_is_socket_tracked( s )) return;
+    if (!strcmp( direction, "send" ))
+    {
+        if (epic_eosh_get_socket_request_type( s ) == EPIC_EOSH_REQUEST_POST_INSTALL_OPERATION &&
+            epic_eosh_buffer_mentions_operation_type( buf, len ))
+            epic_eosh_note_operation_type( buf, len );
+        return;
+    }
+}
+
 static const WSAPROTOCOL_INFOW supported_protocols[] =
 {
     {
@@ -1125,9 +1931,15 @@ static int WS2_recv_base( SOCKET s, WSABUF *buffers, DWORD buffer_count, DWORD *
             return -1;
         status = piosb->Status;
     }
-    if (!status && ret_size) *ret_size = piosb->Information;
     SetLastError( NtStatusToWSAError( status ) );
     TRACE( "status %#lx.\n", status );
+    if (!status && !overlapped)
+    {
+        /* Epic MainService response hook: refresh install state/progress before Wine reports recv size. */
+        epic_eosh_maybe_shim_http_response( s, buffers, buffer_count, &piosb->Information );
+        epic_eosh_maybe_track_http( "recv", s, buffers, buffer_count, piosb->Information );
+    }
+    if (!status && ret_size) *ret_size = piosb->Information;
     return status ? -1 : 0;
 }
 
@@ -1140,6 +1952,9 @@ static int WS2_sendto( SOCKET s, WSABUF *buffers, DWORD buffer_count, DWORD *ret
     PIO_APC_ROUTINE apc = NULL;
     HANDLE event = NULL;
     void *cvalue = NULL;
+    WSABUF modified_buffer;
+    char *modified_buf = NULL;
+    DWORD original_len = 0;
     NTSTATUS status;
 
     TRACE( "socket %#Ix, buffers %p, buffer_count %lu, flags %#lx, addr %p, "
@@ -1177,6 +1992,14 @@ static int WS2_sendto( SOCKET s, WSABUF *buffers, DWORD buffer_count, DWORD *ret
         apc = socket_apc;
     }
 
+    if (!overlapped && !completion &&
+        epic_eosh_strip_if_none_match( s, buffers, buffer_count, &modified_buffer, &modified_buf, &original_len ))
+    {
+        /* Epic MainService request hook: send modified headers, but report the caller's original byte count. */
+        buffers = &modified_buffer;
+        buffer_count = 1;
+    }
+
     params.addr_ptr = u64_from_user_ptr( addr );
     params.addr_len = addr_len;
     params.ws_flags = flags;
@@ -1192,6 +2015,11 @@ static int WS2_sendto( SOCKET s, WSABUF *buffers, DWORD buffer_count, DWORD *ret
             return -1;
         status = piosb->Status;
     }
+    /* Epic MainService request tracker: remember which REST response this socket is about to receive. */
+    if (!status && !overlapped)
+        epic_eosh_maybe_track_http( "send", s, buffers, buffer_count, piosb->Information );
+    if (modified_buf) HeapFree( GetProcessHeap(), 0, modified_buf );
+    if (!status && original_len) piosb->Information = original_len;
     if (!status && ret_size) *ret_size = piosb->Information;
     SetLastError( NtStatusToWSAError( status ) );
     TRACE( "status %#lx.\n", status );

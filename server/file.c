@@ -321,6 +321,12 @@ struct security_descriptor *mode_to_sd( mode_t mode, const struct sid *user, con
         (!(mode & S_IWUSR) && (mode & (S_IWGRP|S_IWOTH))) ||
         (!(mode & S_IXUSR) && (mode & (S_IXGRP|S_IXOTH))))
         dacl_size += sizeof(*ace) + sid_len( user );
+    if (mode & S_IRWXG)
+    {
+        dacl_size += sizeof(*ace) + sid_len( group );
+        if (!equal_sid( group, &builtin_users_sid ))
+            dacl_size += sizeof(*ace) + sid_len( &builtin_users_sid );
+    }
     if (mode & S_IRWXO) dacl_size += sizeof(*ace) + sid_len( &world_sid );
 
     sd = mem_alloc( sizeof(*sd) + sid_len( user ) + sid_len( group ) + dacl_size );
@@ -346,6 +352,12 @@ struct security_descriptor *mode_to_sd( mode_t mode, const struct sid *user, con
         (!(mode & S_IWUSR) && (mode & (S_IWGRP|S_IWOTH))) ||
         (!(mode & S_IXUSR) && (mode & (S_IXGRP|S_IXOTH))))
         dacl->count++;
+    if (mode & S_IRWXG)
+    {
+        dacl->count++;
+        if (!equal_sid( group, &builtin_users_sid ))
+            dacl->count++;
+    }
     if (mode & S_IRWXO) dacl->count++;
 
     flags = (mode & S_IFDIR) ? OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE : 0;
@@ -372,6 +384,26 @@ struct security_descriptor *mode_to_sd( mode_t mode, const struct sid *user, con
         if (!(mode & S_IWUSR) && (mode & (S_IWGRP|S_IROTH)))
             ace->mask |= FILE_GENERIC_WRITE | DELETE | FILE_DELETE_CHILD;
         ace->mask &= ~STANDARD_RIGHTS_ALL; /* never deny standard rights */
+    }
+    if (mode & S_IRWXG)
+    {
+        /* Primary group ACE, plus Epic install-dir compatibility for BUILTIN\Users below. */
+        ace = set_ace( ace_next( ace ), group, ACCESS_ALLOWED_ACE_TYPE, flags, WRITE_DAC | WRITE_OWNER );
+        if (mode & S_IRGRP) ace->mask |= FILE_GENERIC_READ | FILE_GENERIC_EXECUTE;
+        if (mode & S_IWGRP) ace->mask |= FILE_GENERIC_WRITE | DELETE | FILE_DELETE_CHILD;
+
+        if (!equal_sid( group, &builtin_users_sid ))
+        {
+            /*
+             * WineForge launcher-compat: mirror group access through BUILTIN\Users.
+             * WineForge-Internal: launcher-compat/epic-launcher-v1.
+             * WineForge-Feature: launcher-compat/epic-install-builtin-users-acl-v1.
+             */
+            ace = set_ace( ace_next( ace ), &builtin_users_sid, ACCESS_ALLOWED_ACE_TYPE,
+                           flags, WRITE_DAC | WRITE_OWNER );
+            if (mode & S_IRGRP) ace->mask |= FILE_GENERIC_READ | FILE_GENERIC_EXECUTE;
+            if (mode & S_IWGRP) ace->mask |= FILE_GENERIC_WRITE | DELETE | FILE_DELETE_CHILD;
+        }
     }
     if (mode & S_IRWXO)
     {

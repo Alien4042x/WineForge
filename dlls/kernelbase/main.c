@@ -36,6 +36,104 @@ WINE_DEFAULT_DEBUG_CHANNEL(kernelbase);
 
 BOOL is_wow64 = FALSE;
 
+static char *find_bytes( char *buffer, DWORD size, const char *needle )
+{
+    SIZE_T needle_len = strlen( needle );
+    DWORD i;
+
+    if (!needle_len || size < needle_len) return NULL;
+    for (i = 0; i <= size - needle_len; ++i)
+        if (!memcmp( buffer + i, needle, needle_len ))
+            return buffer + i;
+    return NULL;
+}
+
+/*
+ * WineForge launcher-compat: keep Epic Launcher CEF on the stable software path.
+ * WineForge-Internal: launcher-compat/epic-launcher-v1.
+ * WineForge-Feature: launcher-compat/epic-cef-software-config-v1.
+ */
+static void ensure_epic_cef_config(void)
+{
+    static const WCHAR epic_exeW[] =
+        L"\\Epic Games\\Launcher\\Portal\\Binaries\\Win64\\EpicGamesLauncher.exe";
+    static const WCHAR config_relW[] =
+        L"\\Engine\\Config\\Windows\\BaseWindowsEngine.ini";
+    static const WCHAR portalW[] = L"\\Portal\\Binaries\\Win64\\EpicGamesLauncher.exe";
+    static const char section[] = "[ConsoleVariables]";
+    static const char key[] = "r.CEFGPUAcceleration";
+    static const char line[] = "\r\nr.CEFGPUAcceleration=0\r\n";
+    const WCHAR *image = NtCurrentTeb()->Peb->ProcessParameters->ImagePathName.Buffer;
+    SIZE_T image_len, epic_len, base_len, config_len;
+    char *buffer = NULL, *new_buffer = NULL, *pos, *insert;
+    DWORD size, read, written, insert_offset;
+    WCHAR *config;
+    HANDLE file;
+
+    if (!image) return;
+
+    image_len = lstrlenW( image );
+    epic_len = ARRAY_SIZE(epic_exeW) - 1;
+    if (image_len < epic_len || wcsicmp( image + image_len - epic_len, epic_exeW )) return;
+
+    base_len = image_len - (ARRAY_SIZE(portalW) - 1);
+    config_len = base_len + ARRAY_SIZE(config_relW);
+    if (!(config = RtlAllocateHeap( GetProcessHeap(), 0, config_len * sizeof(WCHAR) ))) return;
+
+    memcpy( config, image, base_len * sizeof(WCHAR) );
+    memcpy( config + base_len, config_relW, ARRAY_SIZE(config_relW) * sizeof(WCHAR) );
+
+    file = CreateFileW( config, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                        NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL );
+    if (file == INVALID_HANDLE_VALUE)
+    {
+        WARN( "failed to open Epic config %s, error %lu\n", debugstr_w(config), GetLastError() );
+        goto done;
+    }
+
+    size = GetFileSize( file, NULL );
+    if (size == INVALID_FILE_SIZE || size > 1024 * 1024) goto close;
+    if (!(buffer = RtlAllocateHeap( GetProcessHeap(), 0, size + 1 ))) goto close;
+    if (!ReadFile( file, buffer, size, &read, NULL ) || read != size) goto close;
+    buffer[size] = 0;
+
+    if (find_bytes( buffer, size, key ))
+    {
+        TRACE( "Epic CEF GPU acceleration config already present in %s\n", debugstr_w(config) );
+        goto close;
+    }
+    if (!(pos = find_bytes( buffer, size, section ))) goto close;
+
+    /* Epic Launcher ignores command-line GPU-disable switches here; patch the installed CEF config instead. */
+    insert = pos + strlen( section );
+    while ((insert = find_bytes( insert, size - (insert - buffer), "\n[" )))
+    {
+        if (insert == buffer || insert[-1] != ';') break;
+        insert += 2;
+    }
+    if (!insert) insert = buffer + size;
+    insert_offset = insert - buffer;
+
+    if (!(new_buffer = RtlAllocateHeap( GetProcessHeap(), 0, size + sizeof(line) - 1 ))) goto close;
+    memcpy( new_buffer, buffer, insert_offset );
+    memcpy( new_buffer + insert_offset, line, sizeof(line) - 1 );
+    memcpy( new_buffer + insert_offset + sizeof(line) - 1, buffer + insert_offset, size - insert_offset );
+
+    SetFilePointer( file, 0, NULL, FILE_BEGIN );
+    if (WriteFile( file, new_buffer, size + sizeof(line) - 1, &written, NULL ) &&
+        written == size + sizeof(line) - 1 && SetEndOfFile( file ))
+        TRACE( "ensured Epic CEF GPU acceleration config in %s\n", debugstr_w(config) );
+    else
+        WARN( "failed to update Epic config %s, error %lu\n", debugstr_w(config), GetLastError() );
+
+close:
+    if (new_buffer) RtlFreeHeap( GetProcessHeap(), 0, new_buffer );
+    if (buffer) RtlFreeHeap( GetProcessHeap(), 0, buffer );
+    CloseHandle( file );
+done:
+    RtlFreeHeap( GetProcessHeap(), 0, config );
+}
+
 /***********************************************************************
  *           DllMain
  */
@@ -48,6 +146,8 @@ BOOL WINAPI DllMain( HINSTANCE hinst, DWORD reason, LPVOID reserved )
         init_global_data();
         init_locale( hinst );
         init_startup_info( NtCurrentTeb()->Peb->ProcessParameters );
+        /* Epic Launcher CEF software-rendering gate; no-op for other process paths. */
+        ensure_epic_cef_config();
         init_console();
     }
     return TRUE;

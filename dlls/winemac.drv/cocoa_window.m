@@ -394,6 +394,14 @@ static CVReturn WineDisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTi
     int backingSize[2];
 
     WineMetalView *_metalView;
+    /*
+     * WineForge-Internal: launcher-compat/epic-launcher-v1.
+     * WineForge-Feature: launcher-compat/epic-unreal-cef-metal-mask-v1.
+     */
+    BOOL _metalViewHidden;
+    BOOL _hasMetalViewExclusionRect;
+    CGRect _metalViewExclusionRect;
+    CAShapeLayer *_metalViewMaskLayer;
     NSMutableDictionary<NSNumber*, CALayerHost*>* _caLayerHosts;
 @public
     void *d3dmetal_client_surface;   /* CW HACK 22435 */
@@ -409,6 +417,8 @@ static CVReturn WineDisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTi
     - (void) wine_setBackingSize:(const int*)newBackingSize;
 
     - (WineMetalView*) newMetalViewWithDevice:(id<MTLDevice>)device;
+    - (void) setMetalViewHidden:(BOOL)hidden;
+    - (void) setMetalViewExclusionRect:(CGRect)rect;
     - (void) addCALayerHostViewWithContextId:(CAContextID)contextId;
     - (void) removeCALayerHostView:(CAContextID)contextId;
 
@@ -521,6 +531,7 @@ static CVReturn WineDisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTi
         [markedText release];
         [glContexts release];
         [pendingGlContexts release];
+        [_metalViewMaskLayer release];
         [_caLayerHosts release];
         CGImageRelease(colorImage);
         CGImageRelease(shapeImage);
@@ -716,13 +727,85 @@ static CVReturn WineDisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTi
 
         WineMetalView* view = [[WineMetalView alloc] initWithFrame:[self bounds] device:device];
         [view setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
+        [view setHidden:_metalViewHidden];
         [self setAutoresizesSubviews:YES];
         [self addSubview:view positioned:NSWindowBelow relativeTo:nil];
         _metalView = view;
+        [self updateMetalViewMask];
 
         [(WineWindow*)self.window windowDidDrawContent];
 
         return _metalView;
+    }
+
+    - (void) setMetalViewHidden:(BOOL)hidden
+    {
+        /* Epic UnrealWindow keeps the Metal client surface alive while CEF owns the visible child content. */
+        _metalViewHidden = hidden;
+        [_metalView setHidden:hidden];
+    }
+
+    - (void) updateMetalViewMask
+    {
+        CALayer *layer;
+        CGRect bounds, excluded;
+        CGMutablePathRef path;
+
+        if (!_metalView) return;
+
+        /* Epic CEF exclusion: mask the Metal layer with an even-odd path around the browser child rect. */
+        layer = [_metalView layer];
+        if (!_hasMetalViewExclusionRect || CGRectIsEmpty(_metalViewExclusionRect) || !layer)
+        {
+            layer.mask = nil;
+            [_metalViewMaskLayer release];
+            _metalViewMaskLayer = nil;
+            return;
+        }
+
+        bounds = layer.bounds;
+        excluded = CGRectIntersection(_metalViewExclusionRect, bounds);
+        if (CGRectIsEmpty(bounds) || CGRectIsEmpty(excluded))
+        {
+            layer.mask = nil;
+            [_metalViewMaskLayer release];
+            _metalViewMaskLayer = nil;
+            return;
+        }
+
+        if (!_metalViewMaskLayer)
+        {
+            _metalViewMaskLayer = [[CAShapeLayer layer] retain];
+            _metalViewMaskLayer.fillColor = CGColorGetConstantColor(kCGColorWhite);
+            _metalViewMaskLayer.fillRule = kCAFillRuleEvenOdd;
+        }
+
+        _metalViewMaskLayer.frame = bounds;
+        _metalViewMaskLayer.geometryFlipped = layer.geometryFlipped;
+
+        path = CGPathCreateMutable();
+        CGPathAddRect(path, NULL, bounds);
+        CGPathAddRect(path, NULL, excluded);
+        _metalViewMaskLayer.path = path;
+        CGPathRelease(path);
+
+        layer.mask = _metalViewMaskLayer;
+    }
+
+    - (void) setMetalViewExclusionRect:(CGRect)rect
+    {
+        /* Store the current Epic CEF child rect in Metal-layer coordinates; CGRectNull clears the mask. */
+        if (CGRectIsNull(rect) || CGRectIsEmpty(rect))
+        {
+            _hasMetalViewExclusionRect = NO;
+            _metalViewExclusionRect = CGRectZero;
+        }
+        else
+        {
+            _hasMetalViewExclusionRect = YES;
+            _metalViewExclusionRect = rect;
+        }
+        [self updateMetalViewMask];
     }
 
     - (void) addCALayerHostViewWithContextId:(CAContextID)contextId
@@ -3937,6 +4020,43 @@ void macdrv_set_view_hidden(macdrv_view v, bool hidden)
 
     OnMainThreadAsync(^{
         [view setHidden:hidden];
+        [(WineWindow*)view.window updateForGLSubviews];
+    });
+}
+}
+
+/***********************************************************************
+ *              macdrv_set_view_metal_hidden
+ */
+void macdrv_set_view_metal_hidden(macdrv_view v, bool hidden)
+{
+@autoreleasepool
+{
+    WineContentView* view = (WineContentView*)v;
+
+    /* Epic Unreal/CEF Metal mask hook: toggle only the backing Metal subview, not the Wine content view. */
+    OnMainThreadAsync(^{
+        [view setMetalViewHidden:hidden];
+        [(WineWindow*)view.window updateForGLSubviews];
+    });
+}
+}
+
+/***********************************************************************
+ *              macdrv_set_view_metal_exclusion_rect
+ */
+void macdrv_set_view_metal_exclusion_rect(macdrv_view v, CGRect rect)
+{
+@autoreleasepool
+{
+    WineContentView* view = (WineContentView*)v;
+
+    if (CGRectIsNull(rect)) rect = CGRectZero;
+
+    /* Epic Unreal/CEF Metal mask hook: pass the browser exclusion rect into the Cocoa view layer mask. */
+    OnMainThreadAsync(^{
+        CGRect mac_rect = cgrect_mac_from_win(rect);
+        [view setMetalViewExclusionRect:mac_rect];
         [(WineWindow*)view.window updateForGLSubviews];
     });
 }
