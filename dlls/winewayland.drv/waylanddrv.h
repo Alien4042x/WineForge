@@ -113,6 +113,7 @@ struct wayland_pointer
     struct wp_cursor_shape_device_v1 *wp_cursor_shape_device_v1;
     HWND focused_hwnd;
     HWND constraint_hwnd;
+    BOOL relative_mode;
     BOOL pending_warp;
     uint32_t enter_serial;
     uint32_t button_serial;
@@ -235,7 +236,6 @@ struct wayland_surface_config
 struct wayland_window_config
 {
     RECT rect;
-    RECT client_rect;
     enum wayland_surface_config_state state;
     /* The scale (i.e., normalized dpi) the window is rendering at. */
     double scale;
@@ -249,6 +249,7 @@ struct wayland_client_surface
 {
     struct client_surface client;
     HWND toplevel;
+    RECT rect;
     struct wl_surface *wl_surface;
     struct wl_subsurface *wl_subsurface;
     struct wp_viewport *wp_viewport;
@@ -337,7 +338,7 @@ RECT map_rect_to_surface(struct wayland_surface *surface, RECT rect);
 POINT map_point_to_surface(struct wayland_surface *surface, POINT point);
 RECT map_rect_from_surface(struct wayland_surface *surface, RECT rect);
 POINT map_point_from_surface(struct wayland_surface *surface, POINT point);
-void wayland_client_surface_attach(struct wayland_client_surface *client, HWND toplevel);
+void wayland_client_surface_attach(struct wayland_client_surface *client, HWND toplevel, const RECT *rect);
 void wayland_surface_ensure_contents(struct wayland_surface *surface);
 void wayland_surface_set_title(struct wayland_surface *surface, LPCWSTR title);
 void wayland_surface_assign_icon(struct wayland_surface *surface);
@@ -385,14 +386,13 @@ struct wayland_win_data
 };
 
 struct wayland_win_data *wayland_win_data_get(HWND hwnd);
-struct wayland_win_data *wayland_win_data_get_nolock(HWND hwnd);
 void wayland_win_data_release(struct wayland_win_data *data);
 
 struct wayland_client_surface *get_client_surface(HWND hwnd);
 void set_client_surface(HWND hwnd, struct wayland_client_surface *client);
 BOOL set_window_surface_contents(HWND hwnd, struct wayland_shm_buffer *shm_buffer, HRGN damage_region);
 struct wayland_shm_buffer *get_window_surface_contents(HWND hwnd);
-void ensure_window_surface_contents(HWND hwnd);
+void wayland_window_init(void);
 
 /**********************************************************************
  *          Wayland Keyboard

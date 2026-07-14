@@ -251,6 +251,12 @@ struct property_data
     lparam_t       data;
 };
 
+struct ratio
+{
+    unsigned short num;
+    unsigned short den;
+};
+
 
 struct rectangle
 {
@@ -334,6 +340,7 @@ union hw_input
         unsigned int   flags;
         unsigned int   time;
         lparam_t       info;
+        unsigned int   raw_count;
     } mouse;
     struct
     {
@@ -891,7 +898,8 @@ struct monitor_info
     struct rectangle raw;
     struct rectangle virt;
     unsigned int     flags;
-    unsigned int     dpi;
+    struct ratio     dpi;
+    struct ratio     raw_dpi;
 };
 #define MONITOR_FLAG_PRIMARY  0x01
 #define MONITOR_FLAG_CLONE    0x02
@@ -1062,6 +1070,8 @@ typedef volatile struct
     unsigned int         fnid;
     unsigned int         ansi;
     int                  __pad;
+    struct ratio         dpi;
+    struct ratio         raw_dpi;
     data_size_t          private_size;
     data_size_t          extra_size;
     struct window_info   info;
@@ -3144,7 +3154,7 @@ struct send_hardware_message_request
     user_handle_t   win;
     union hw_input  input;
     unsigned int    flags;
-    /* VARARG(report,bytes); */
+    /* VARARG(extra,bytes); */
     char __pad_60[4];
 };
 struct send_hardware_message_reply
@@ -3158,6 +3168,7 @@ struct send_hardware_message_reply
     char __pad_28[4];
 };
 #define SEND_HWMSG_INJECTED    0x01
+#define SEND_HWMSG_RAWINPUT    0x02
 
 
 
@@ -3703,7 +3714,7 @@ struct get_window_children_from_point_request
     user_handle_t  parent;
     int            x;
     int            y;
-    int            dpi;
+    struct ratio   dpi;
     char __pad_28[4];
 };
 struct get_window_children_from_point_reply
@@ -3740,13 +3751,11 @@ struct set_window_pos_request
     struct request_header __header;
     unsigned short swp_flags;
     unsigned short paint_flags;
-    unsigned int   monitor_dpi;
     user_handle_t  handle;
     user_handle_t  previous;
     struct rectangle window;
     struct rectangle client;
     /* VARARG(valid,rectangles); */
-    char __pad_60[4];
 };
 struct set_window_pos_reply
 {
@@ -3766,7 +3775,7 @@ struct get_window_rectangles_request
     struct request_header __header;
     user_handle_t  handle;
     int            relative;
-    int            dpi;
+    struct ratio   dpi;
 };
 struct get_window_rectangles_reply
 {
@@ -3817,7 +3826,7 @@ struct get_windows_offset_request
     struct request_header __header;
     user_handle_t  from;
     user_handle_t  to;
-    int            dpi;
+    struct ratio   dpi;
 };
 struct get_windows_offset_reply
 {
@@ -7226,6 +7235,6 @@ union generic_reply
     struct d3dkmt_mutex_release_reply d3dkmt_mutex_release_reply;
 };
 
-#define SERVER_PROTOCOL_VERSION 958
+#define SERVER_PROTOCOL_VERSION 957
 
 #endif /* __WINE_WINE_SERVER_PROTOCOL_H */

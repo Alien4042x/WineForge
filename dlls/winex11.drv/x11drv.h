@@ -371,7 +371,6 @@ struct x11drv_client_surface
     XWindowChanges changes;
     Colormap colormap;
     Window window;
-    RECT rect;
 
     HDC hdc_src;
     HDC hdc_dst;
@@ -431,6 +430,7 @@ struct x11drv_thread_data
     XIValuatorClassInfo x_valuator;
     XIValuatorClassInfo y_valuator;
     int      xinput2_pointer;      /* XInput2 master pointer device id */
+    int      root_window_users;    /* counter for root window XISelectEvents */
 #endif /* HAVE_X11_EXTENSIONS_XINPUT2_H */
 
     struct display_state desired_state;       /* display state tracking the desired / win32 state */
