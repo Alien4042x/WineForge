@@ -81,7 +81,7 @@ arch -x86_64 "$SOURCE/configure" \
   --without-gphoto \
   --with-gnutls \
   --without-gssapi \
-  --without-gstreamer \
+  --with-gstreamer \
   --without-inotify \
   --without-krb5 \
   --with-mingw \
