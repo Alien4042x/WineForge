@@ -118,6 +118,38 @@ WineForge expects the D3DMetal runtime to be available from a local runtime dire
 
 Wine's Mono and Gecko handling remains upstream Wine behavior. This source tree does not bundle Mono or Gecko unpacked directories.
 
+## Supported Launchers
+
+Launcher compatibility is tested as part of the WineForge game-focused runtime path.
+
+### Steam
+
+Steam is supported for storefront, library, download, and game launch workflows. Steam overlay inside games is currently not supported in this tree.
+
+### Epic Games Launcher
+
+Epic Games Launcher is supported for storefront, download, install, and game launch workflows.
+
+Known issue: opening the Friends/social panel can show a black surface in the Store UI. The launcher otherwise remains functional. This appears tied to Epic's accelerated browser surface; WineForge does not currently have a reliable launcher-side switch to disable that GPU acceleration path.
+
+## WFUSync
+
+WFUSync is an opt-in WineForge userspace synchronization backend for macOS.
+
+Enable it with:
+
+```sh
+WINEWFUSYNC=1
+```
+
+Disable it by unsetting the variable or setting:
+
+```sh
+WINEWFUSYNC=0
+```
+
+Unsupported waits and sensitive synchronization semantics remain on the Wine server fallback path. Probe and targeted validation have shown good results, but this is not claimed as a guaranteed per-game performance improvement.
+
 ## Status
 
 This is an experimental WineForge source tree focused on local testing and reproducible macOS gaming builds.

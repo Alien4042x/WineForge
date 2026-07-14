@@ -305,6 +305,11 @@ DECL_HANDLER(get_next_process);
 DECL_HANDLER(get_next_thread);
 DECL_HANDLER(set_keyboard_repeat);
 DECL_HANDLER(get_inproc_sync_fd);
+DECL_HANDLER(get_wfusync_wait_slot);
+DECL_HANDLER(register_wfusync_wait);
+DECL_HANDLER(unregister_wfusync_wait);
+DECL_HANDLER(wake_wfusync_waiters);
+DECL_HANDLER(try_wait_all_wfusync);
 DECL_HANDLER(get_inproc_alert_fd);
 DECL_HANDLER(d3dkmt_object_create);
 DECL_HANDLER(d3dkmt_object_update);
@@ -616,6 +621,11 @@ static const req_handler req_handlers[REQ_NB_REQUESTS] =
     (req_handler)req_get_next_thread,
     (req_handler)req_set_keyboard_repeat,
     (req_handler)req_get_inproc_sync_fd,
+    (req_handler)req_get_wfusync_wait_slot,
+    (req_handler)req_register_wfusync_wait,
+    (req_handler)req_unregister_wfusync_wait,
+    (req_handler)req_wake_wfusync_waiters,
+    (req_handler)req_try_wait_all_wfusync,
     (req_handler)req_get_inproc_alert_fd,
     (req_handler)req_d3dkmt_object_create,
     (req_handler)req_d3dkmt_object_update,
@@ -2328,7 +2338,20 @@ C_ASSERT( offsetof(struct get_inproc_sync_fd_request, handle) == 12 );
 C_ASSERT( sizeof(struct get_inproc_sync_fd_request) == 16 );
 C_ASSERT( offsetof(struct get_inproc_sync_fd_reply, type) == 8 );
 C_ASSERT( offsetof(struct get_inproc_sync_fd_reply, access) == 12 );
-C_ASSERT( sizeof(struct get_inproc_sync_fd_reply) == 16 );
+C_ASSERT( offsetof(struct get_inproc_sync_fd_reply, shm_idx) == 16 );
+C_ASSERT( sizeof(struct get_inproc_sync_fd_reply) == 24 );
+C_ASSERT( sizeof(struct get_wfusync_wait_slot_request) == 16 );
+C_ASSERT( offsetof(struct get_wfusync_wait_slot_reply, shm_idx) == 8 );
+C_ASSERT( sizeof(struct get_wfusync_wait_slot_reply) == 16 );
+C_ASSERT( offsetof(struct register_wfusync_wait_request, slot_idx) == 12 );
+C_ASSERT( sizeof(struct register_wfusync_wait_request) == 16 );
+C_ASSERT( offsetof(struct unregister_wfusync_wait_request, slot_idx) == 12 );
+C_ASSERT( sizeof(struct unregister_wfusync_wait_request) == 16 );
+C_ASSERT( offsetof(struct wake_wfusync_waiters_request, shm_idx) == 12 );
+C_ASSERT( sizeof(struct wake_wfusync_waiters_request) == 16 );
+C_ASSERT( offsetof(struct try_wait_all_wfusync_request, tid) == 12 );
+C_ASSERT( offsetof(struct try_wait_all_wfusync_request, slot_idx) == 16 );
+C_ASSERT( sizeof(struct try_wait_all_wfusync_request) == 24 );
 C_ASSERT( sizeof(struct get_inproc_alert_fd_request) == 16 );
 C_ASSERT( offsetof(struct get_inproc_alert_fd_reply, handle) == 8 );
 C_ASSERT( sizeof(struct get_inproc_alert_fd_reply) == 16 );

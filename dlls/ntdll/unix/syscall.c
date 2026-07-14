@@ -229,12 +229,27 @@ static void stub_syscall( const char *name )
 #define SYSCALL_STUB(name) static void name(void) { stub_syscall( #name ); }
 ALL_SYSCALL_STUBS
 
+#if defined(__APPLE__) && defined(__x86_64__)
+extern NTSTATUS d3dmetal_sysv_NtResetEvent( HANDLE handle, LONG *prev_state );
+extern NTSTATUS d3dmetal_sysv_NtReleaseSemaphore( HANDLE handle, ULONG count, ULONG *previous );
+extern NTSTATUS d3dmetal_sysv_NtSetEvent( HANDLE handle, LONG *prev_state );
+#define NtResetEvent d3dmetal_sysv_NtResetEvent
+#define NtReleaseSemaphore d3dmetal_sysv_NtReleaseSemaphore
+#define NtSetEvent d3dmetal_sysv_NtSetEvent
+#endif
+
 static void * const syscalls[] =
 {
 #define SYSCALL_ENTRY(id,name,args) name,
     ALL_SYSCALLS
 #undef SYSCALL_ENTRY
 };
+
+#if defined(__APPLE__) && defined(__x86_64__)
+#undef NtResetEvent
+#undef NtReleaseSemaphore
+#undef NtSetEvent
+#endif
 
 static BYTE syscall_args[ARRAY_SIZE(syscalls)] =
 {

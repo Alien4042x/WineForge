@@ -45,6 +45,7 @@ SOURCES = \
 	unicode.c \
 	user.c \
 	window.c \
+	wfusync.c \
 	wineserver.de.UTF-8.man.in \
 	wineserver.fr.UTF-8.man.in \
 	wineserver.man.in \

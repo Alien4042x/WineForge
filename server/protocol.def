@@ -4213,8 +4213,37 @@ enum inproc_sync_type
 @REPLY
     int           type;         /* inproc sync type */
     unsigned int access;        /* handle access rights */
+    unsigned int shm_idx;       /* optional for index-based sync implementations */
 @END
 
+/* Get a per-thread WFUSync wait slot */
+@REQ(get_wfusync_wait_slot)
+@REPLY
+    unsigned int shm_idx;       /* shared-memory index of the wait slot */
+@END
+
+/* Register a WFUSync WaitAny wait */
+@REQ(register_wfusync_wait)
+    unsigned int slot_idx;      /* wait slot shared-memory index */
+    VARARG(shm_idxs,uints);     /* object shared-memory indexes */
+@END
+
+/* Unregister a WFUSync WaitAny wait */
+@REQ(unregister_wfusync_wait)
+    unsigned int slot_idx;      /* wait slot shared-memory index */
+@END
+
+/* Wake WFUSync WaitAny wait slots for a signaled object */
+@REQ(wake_wfusync_waiters)
+    unsigned int shm_idx;       /* object shared-memory index */
+@END
+
+/* Try to satisfy WFUSync WaitAll, optionally registering a wait slot */
+@REQ(try_wait_all_wfusync)
+    thread_id_t  tid;           /* waiting thread id */
+    unsigned int slot_idx;      /* wait slot index, or zero for a nonblocking try */
+    VARARG(entries,uints);      /* shm_idx, generation, type triples */
+@END
 
 /* Get the in-process synchronization fd for the current thread user APC alerts */
 @REQ(get_inproc_alert_fd)
