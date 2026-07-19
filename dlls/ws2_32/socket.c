@@ -376,6 +376,14 @@ static BOOL epic_eosh_extract_json_number( const char *buf, DWORD len, const cha
     return copy != 0;
 }
 
+static BOOL epic_eosh_progress_is_user_cancelled( const char *progress )
+{
+    size_t len = strlen(progress);
+
+    return epic_eosh_memmem( progress, len, "\"failureType\":\"UserCanceled\"", 28 ) ||
+           epic_eosh_memmem( progress, len, "\"errorCode\":\"UC01\"", 18 );
+}
+
 static BOOL epic_eosh_copy_json_object( const char *buf, DWORD len, char *out, size_t out_size )
 {
     DWORD i;
@@ -489,6 +497,11 @@ static BOOL epic_eosh_refresh_progress_from_logs(void)
 
     FindClose( find );
     if (!found) return FALSE;
+    if (epic_eosh_progress_is_user_cancelled( epic_eosh_progress_json ))
+    {
+        epic_eosh_active_operation_id[0] = 0;
+        return FALSE;
+    }
 
     if (!epic_eosh_extract_json_string( epic_eosh_progress_json, strlen(epic_eosh_progress_json),
                                         "\"state\"", epic_eosh_progress_state,
@@ -573,7 +586,11 @@ static BOOL epic_eosh_replace_operations_response( SOCKET s, char *buf, DWORD ca
     if (!started) started = GetTickCount64();
     status = running ? "Running" : "Completed";
     if (epic_eosh_refresh_progress_from_logs())
+    {
         progress_json = epic_eosh_progress_json;
+        if (!strcmp( epic_eosh_progress_state, "Completed" ))
+            status = "Completed";
+    }
 
     if (!strcmp( status, "Running" ))
     {
