@@ -340,10 +340,6 @@ extern BOOL is_d3dmetal_module_name( const char *path );
 extern BOOL is_d3dmetal_unixlib_name( const char *path );
 extern char *resolve_d3dmetal_pe_path( const char *module );
 extern char *resolve_d3dmetal_unixlib_path( const char *path );
-extern BOOL dxmt_graphics_backend_enabled(void);
-extern BOOL is_dxmt_module_name( const char *path );
-extern char *resolve_dxmt_pe_path( const char *module, USHORT machine );
-extern char *resolve_dxmt_unixlib_path( const char *path );
 extern NTSTATUS load_builtin_unixlib_now( void *module );
 extern NTSTATUS set_builtin_unixlib_name( void *module, const char *name );
 
