@@ -1025,12 +1025,195 @@ void *libd3dshared_load_addr = NULL, *libd3dshared_code_end = NULL;
 static void (*register_non_native_code_region)( void *, void * );
 static BOOL (*supports_non_native_code_regions)(void);
 
+enum process_graphics_backend
+{
+    PROCESS_GRAPHICS_BACKEND_UNINITIALIZED,
+    PROCESS_GRAPHICS_BACKEND_WINE,
+    PROCESS_GRAPHICS_BACKEND_D3DMETAL,
+    PROCESS_GRAPHICS_BACKEND_DXMT,
+};
+
+static enum process_graphics_backend process_graphics_backend;
+static BOOL process_uses_cef_software;
+static BOOL process_uses_dxmt_cef;
+
+static BOOL parse_graphics_backend( const char *name, enum process_graphics_backend *backend )
+{
+    if (name && !strcmp( name, "d3dmetal" ))
+    {
+        *backend = PROCESS_GRAPHICS_BACKEND_D3DMETAL;
+        return TRUE;
+    }
+    if (name && !strcmp( name, "dxmt" ))
+    {
+        *backend = PROCESS_GRAPHICS_BACKEND_DXMT;
+        return TRUE;
+    }
+    if (name && !strcmp( name, "wine" ))
+    {
+        *backend = PROCESS_GRAPHICS_BACKEND_WINE;
+        return TRUE;
+    }
+    return FALSE;
+}
+
+static BOOL ascii_path_ends_with_ci( const char *path, const char *suffix )
+{
+    size_t path_len = strlen( path );
+    size_t suffix_len = strlen( suffix );
+    size_t i;
+
+    if (suffix_len > path_len) return FALSE;
+    path += path_len - suffix_len;
+    for (i = 0; i < suffix_len; i++)
+    {
+        unsigned char left = path[i], right = suffix[i];
+
+        if ((left == '/' || left == '\\') && (right == '/' || right == '\\')) continue;
+        if (left >= 'A' && left <= 'Z') left += 'a' - 'A';
+        if (right >= 'A' && right <= 'Z') right += 'a' - 'A';
+        if (left != right) return FALSE;
+    }
+    return TRUE;
+}
+
+/* WineForge-Internal: dxmt-cef/process-routing-v1.
+ * Keep this list limited to launchers proven to require the isolated runtime. */
+static const char *const dxmt_cef_app_paths[] =
+{
+    "\\rockstar games\\launcher\\launcher.exe",
+    "\\rockstar games\\social club\\socialclubhelper.exe",
+};
+
+static BOOL is_dxmt_cef_app( const char *image_path )
+{
+    const char *runtime_dir = getenv( "DXMT_CEF_RUNTIME_DIR" );
+    unsigned int i;
+
+    if (!runtime_dir || !runtime_dir[0]) return FALSE;
+    for (i = 0; i < ARRAY_SIZE(dxmt_cef_app_paths); i++)
+        if (ascii_path_ends_with_ci( image_path, dxmt_cef_app_paths[i] )) return TRUE;
+    return FALSE;
+}
+
+static BOOL wargv_has_ascii_argument_ci( const char *argument )
+{
+    unsigned int i;
+
+    if (!main_wargv) return FALSE;
+    for (i = 1; main_wargv[i]; i++)
+    {
+        const WCHAR *wide = main_wargv[i];
+        const char *ascii = argument;
+
+        while (*wide && *ascii)
+        {
+            WCHAR left = *wide++;
+            unsigned char right = *ascii++;
+
+            if (left >= 'A' && left <= 'Z') left += 'a' - 'A';
+            if (right >= 'A' && right <= 'Z') right += 'a' - 'A';
+            if (left != right) break;
+        }
+        if (!*wide && !*ascii) return TRUE;
+    }
+    return FALSE;
+}
+
+static BOOL is_software_cef_process(void)
+{
+    return wargv_has_ascii_argument_ci( "--disable-gpu" ) &&
+           wargv_has_ascii_argument_ci( "--disable-d3d11" ) &&
+           wargv_has_ascii_argument_ci( "--use-angle=swiftshader" );
+}
+
+static const char *process_graphics_backend_name( enum process_graphics_backend backend )
+{
+    switch (backend)
+    {
+    case PROCESS_GRAPHICS_BACKEND_D3DMETAL: return "d3dmetal";
+    case PROCESS_GRAPHICS_BACKEND_DXMT: return "dxmt";
+    default: return "wine";
+    }
+}
+
+static void init_process_graphics_backend( const WCHAR *image_path )
+{
+    const char *backend = getenv( "GRAPHICS_BACKEND" );
+    const WCHAR *image_name = image_path;
+    const WCHAR *p;
+    char image_pathA[PATH_MAX];
+    char image_nameA[MAX_PATH];
+    enum process_graphics_backend configured_backend;
+    int path_len, name_len;
+
+    if (!backend || !backend[0]) backend = getenv( "ACTIVE_GRAPHICS_BACKEND" );
+    if (image_path)
+    {
+        for (p = image_path; *p; p++)
+            if (*p == '\\' || *p == '/') image_name = p + 1;
+    }
+    path_len = image_path ? ntdll_wcstoumbs( image_path, wcslen( image_path ), image_pathA,
+                                             sizeof(image_pathA) - 1, FALSE ) : 0;
+    if (path_len < 0) path_len = 0;
+    image_pathA[path_len] = 0;
+    name_len = image_name ? ntdll_wcstoumbs( image_name, wcslen( image_name ), image_nameA,
+                                             sizeof(image_nameA) - 1, FALSE ) : 0;
+    if (name_len < 0) name_len = 0;
+    image_nameA[name_len] = 0;
+
+    if (!parse_graphics_backend( backend, &configured_backend ))
+        configured_backend = PROCESS_GRAPHICS_BACKEND_WINE;
+    process_graphics_backend = configured_backend;
+
+    /* WineForge-Internal: launcher-compat/cef-software-policy-v1. */
+    process_uses_cef_software = configured_backend == PROCESS_GRAPHICS_BACKEND_DXMT &&
+                                is_software_cef_process();
+
+    /* WineForge-Internal: dxmt-cef/process-routing-v1. */
+    process_uses_dxmt_cef = is_dxmt_cef_app( image_pathA );
+    if (process_uses_dxmt_cef)
+    {
+        process_graphics_backend = PROCESS_GRAPHICS_BACKEND_DXMT;
+    }
+
+    TRACE( "graphics backend for %s: global %s, selected %s, policy %s%s\n", image_nameA,
+           backend && backend[0] ? backend : "wine",
+           process_graphics_backend_name( process_graphics_backend ),
+           process_uses_cef_software ? "cef-software" : "default",
+           process_uses_dxmt_cef ? ",dxmt-cef" : "" );
+}
+
 BOOL d3dmetal_graphics_backend_enabled(void)
 {
     const char *backend = getenv( "GRAPHICS_BACKEND" );
 
+    if (process_uses_cef_software) return FALSE;
+    if (process_graphics_backend != PROCESS_GRAPHICS_BACKEND_UNINITIALIZED)
+        return process_graphics_backend == PROCESS_GRAPHICS_BACKEND_D3DMETAL;
     if (!backend || !backend[0]) backend = getenv( "ACTIVE_GRAPHICS_BACKEND" );
     return backend && !strcmp( backend, "d3dmetal" );
+}
+
+BOOL dxmt_graphics_backend_enabled(void)
+{
+    const char *backend = getenv( "GRAPHICS_BACKEND" );
+
+    if (process_uses_cef_software) return FALSE;
+    if (process_graphics_backend != PROCESS_GRAPHICS_BACKEND_UNINITIALIZED)
+        return process_graphics_backend == PROCESS_GRAPHICS_BACKEND_DXMT;
+    if (!backend || !backend[0]) backend = getenv( "ACTIVE_GRAPHICS_BACKEND" );
+    return backend && !strcmp( backend, "dxmt" );
+}
+
+BOOL dxmt_cef_runtime_enabled(void)
+{
+    return process_uses_dxmt_cef;
+}
+
+static BOOL cef_software_policy_enabled(void)
+{
+    return process_uses_cef_software;
 }
 
 /* WineForge-Internal: d3dmetal-code-region-runtime-dir-v1. */
@@ -1294,6 +1477,7 @@ static NTSTATUS find_builtin_dll( UNICODE_STRING *nt_name, ANSI_STRING *exp_name
     BOOL found_image = FALSE;
 #if defined(__APPLE__) && defined(__x86_64__)
     BOOL d3dmetal_runtime_pe = FALSE;
+    BOOL dxmt_runtime_pe = FALSE;
 #endif
 
     InitializeObjectAttributes( &attr, nt_name, 0, 0, NULL );
@@ -1341,11 +1525,34 @@ static NTSTATUS find_builtin_dll( UNICODE_STRING *nt_name, ANSI_STRING *exp_name
     TRACE( "looking for %s for file %s\n", debugstr_a(file + pos + 1), debugstr_us(nt_name) );
 
 #if defined(__APPLE__) && defined(__x86_64__)
-    if (d3dmetal_graphics_backend_enabled() && steam_cef_native_vulkan_loader( nt_name, file + pos + 1 ))
+    if ((d3dmetal_graphics_backend_enabled() || cef_software_policy_enabled()) &&
+        steam_cef_native_vulkan_loader( nt_name, file + pos + 1 ))
     {
-        TRACE( "D3DMetal Steam frontend using native CEF Vulkan loader for %s\n", debugstr_us(nt_name) );
+        TRACE( "Steam frontend using native CEF Vulkan loader for %s\n", debugstr_us(nt_name) );
         status = STATUS_DLL_NOT_FOUND;
         goto done;
+    }
+
+    /* WineForge-Internal: the selected DXMT runtime must win over Wine's build tree. */
+    if (dxmt_graphics_backend_enabled() && is_dxmt_module_name( file + pos + 1 ))
+    {
+        char *dxmt_pe = resolve_dxmt_pe_path( file + pos + 1, search_machine );
+
+        if (dxmt_pe)
+        {
+            status = open_builtin_pe_file( dxmt_pe, &attr, module, size_ptr, image_info,
+                                           limit_low, limit_high, load_machine, prefer_native, offset );
+            if (status != STATUS_DLL_NOT_FOUND)
+            {
+                TRACE( "DXMT runtime PE %s for %s -> %#lx\n",
+                       debugstr_a(dxmt_pe), debugstr_us(nt_name), (long)status );
+                free( dxmt_pe );
+                ptr = file + pos;
+                dxmt_runtime_pe = TRUE;
+                goto done;
+            }
+            free( dxmt_pe );
+        }
     }
 #endif
 
@@ -1431,6 +1638,7 @@ done:
     if (NT_SUCCESS(status) && ext)
     {
         char *d3dmetal_unixlib = NULL;
+        char *dxmt_unixlib = NULL;
         const char *unixlib_path = ptr;
 
         strcpy( ext, ".so" );
@@ -1438,9 +1646,12 @@ done:
         if (is_d3dmetal_unixlib_name( ptr ))
             d3dmetal_unixlib = resolve_d3dmetal_unixlib_path( ptr );
         if (d3dmetal_unixlib) unixlib_path = d3dmetal_unixlib;
+        if (dxmt_runtime_pe)
+            dxmt_unixlib = resolve_dxmt_unixlib_path( ptr );
+        if (dxmt_unixlib) unixlib_path = dxmt_unixlib;
 #endif
 #if defined(__APPLE__) && defined(__x86_64__)
-        if (!d3dmetal_runtime_pe || d3dmetal_unixlib)
+        if ((!d3dmetal_runtime_pe && !dxmt_runtime_pe) || d3dmetal_unixlib || dxmt_unixlib)
 #endif
             set_builtin_unixlib_name( *module, unixlib_path );
 #if defined(__APPLE__) && defined(__x86_64__)
@@ -1457,7 +1668,15 @@ done:
                        debugstr_a(unixlib_path), debugstr_us(nt_name), (long)unix_status );
             }
         }
+        if (dxmt_unixlib)
+        {
+            NTSTATUS unix_status = load_builtin_unixlib_now( *module );
+
+            TRACE( "DXMT immediate unixlib load %s for %s -> %#lx\n",
+                   debugstr_a(dxmt_unixlib), debugstr_us(nt_name), (long)unix_status );
+        }
         free( d3dmetal_unixlib );
+        free( dxmt_unixlib );
 #endif
     }
     free( file );
@@ -2129,6 +2348,9 @@ static void start_main_thread(void)
     init_startup_info();
     *(ULONG_PTR *)&peb->CloudFileFlags = get_image_address();
     set_load_order_app_name( main_wargv[0] );
+#if defined(__APPLE__) && defined(__x86_64__)
+    init_process_graphics_backend( main_wargv[0] );
+#endif
     init_thread_stack( teb, 0, 0, 0 );
     NtCreateKeyedEvent( &keyed_event, GENERIC_READ | GENERIC_WRITE, NULL, 0 );
     load_ntdll();

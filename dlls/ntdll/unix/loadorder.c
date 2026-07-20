@@ -498,6 +498,7 @@ enum loadorder get_load_order( const UNICODE_STRING *nt_name, BOOL is_system_dir
                                const struct pe_mapping_info *pe_mapping )
 {
     static const WCHAR prefixW[] = {'\\','?','?','\\'};
+    static const WCHAR d3d12W[] = {'d','3','d','1','2',0};
     enum loadorder ret = LO_INVALID;
     const WCHAR *path = nt_name->Buffer;
     unsigned int len = nt_name->Length / sizeof(WCHAR);
@@ -516,6 +517,22 @@ enum loadorder get_load_order( const UNICODE_STRING *nt_name, BOOL is_system_dir
     module[len + 1] = 0;
     remove_dll_ext( module + 1 );
     basename = get_basename( module + 1 );
+
+#if defined(__APPLE__) && defined(__x86_64__)
+    /* WineForge-Internal: DXMT has no D3D12; do not mix in D3DMetal's DLL. */
+    if (dxmt_graphics_backend_enabled() && !wcsicmp( basename, d3d12W ))
+    {
+        ret = LO_DISABLED;
+        TRACE( "disabling D3D12 for DXMT process %s\n", debugstr_us(nt_name) );
+        goto done;
+    }
+    if (dxmt_graphics_backend_enabled() && is_dxmt_module_basename( basename ))
+    {
+        ret = LO_BUILTIN;
+        TRACE( "forcing builtin load order for DXMT module %s\n", debugstr_us(nt_name) );
+        goto done;
+    }
+#endif
 
     /* first explicit module name */
     if ((ret = get_load_order_value( std_key, app_key, is_system_dir ? basename : module+1 )) != LO_INVALID)
