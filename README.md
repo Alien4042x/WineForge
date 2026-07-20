@@ -1,6 +1,6 @@
 # WineForge
 
-![WineForge](https://img.shields.io/badge/WineForge-0.6.0.0-blue)
+![WineForge](https://img.shields.io/badge/WineForge-0.6.0.1-blue)
 ![Wine](https://img.shields.io/badge/Wine-11.13-8a2be2)
 ![Platform](https://img.shields.io/badge/platform-macOS-lightgrey)
 ![License](https://img.shields.io/badge/license-LGPL--2.1--or--later-green)
@@ -15,7 +15,7 @@ This repository is not upstream Wine, not CrossOver, and not a complete runtime 
 Current build identity:
 
 ```text
-wine-11.13 (WineForge 0.6.0.0)
+wine-11.13 (WineForge 0.6.0.1)
 ```
 
 ## Credits
@@ -118,6 +118,76 @@ WineForge expects the D3DMetal runtime to be available from a local runtime dire
 
 Wine's Mono and Gecko handling remains upstream Wine behavior. This source tree does not bundle Mono or Gecko unpacked directories.
 
+## Graphics Backends
+
+D3DMetal remains the primary D3D11 and D3D12 backend. WineForge also supports process-selectable [DXMT](https://github.com/3Shain/dxmt) for D3D10 and D3D11 applications and games. DXMT does not provide D3D12 support.
+
+WineForge can route selected launcher processes to a separate [DXMT-CEF](https://github.com/Alien4042x/dxmt-cef) runtime while the game keeps the configured global graphics backend. DXMT-CEF is a focused DXMT variant for CEF-based launchers that require D3D11 rendering unavailable through D3DMetal. It is currently used by Rockstar Games Launcher and Social Club Helper.
+
+DXMT and DXMT-CEF runtime binaries are maintained separately and are not bundled in this source repository.
+
+## Running a Local Build
+
+The examples below assume that the Wine build and the external graphics runtimes have already been installed. The packaging layer must make the matching PE DLL and Unix library directories available through `WINEDLLPATH`, `DYLD_LIBRARY_PATH`, or equivalent launcher setup.
+
+Set the common paths first:
+
+```sh
+export WINE=/path/to/wineforge/bin/wine
+export WINEPREFIX=/path/to/prefix
+export D3DMETAL_RUNTIME_DIR=/path/to/lib/d3dmetal
+export DXMT_RUNTIME_DIR=/path/to/lib/dxmt
+export DXMT_CEF_RUNTIME_DIR=/path/to/lib/dxmt-cef
+```
+
+Run with D3DMetal using the AMD / FidelityFX identity:
+
+```sh
+env GRAPHICS_BACKEND=d3dmetal \
+    D3DMETAL_UPSCALER_PROFILE=amd \
+    D3DM_VENDOR_ID=4098 \
+    D3DM_DEVICE_ID=29631 \
+    D3DM_DEVICE_DESCRIPTION="AMD Radeon RX 6800 XT" \
+    WINEDLLOVERRIDES='atidxx64,amdxc64,amd_fidelityfx_upscaler_dx12,amd_fidelityfx_framegeneration_dx12=n,b;dxgi,d3d10,d3d10core,d3d11,d3d12=n,b' \
+    "$WINE" /path/to/application.exe
+```
+
+Run with D3DMetal using the NVIDIA / MetalFX identity:
+
+```sh
+env GRAPHICS_BACKEND=d3dmetal \
+    D3DMETAL_UPSCALER_PROFILE=nvidia \
+    D3DM_VENDOR_ID=4318 \
+    D3DM_DEVICE_ID=10370 \
+    D3DM_DEVICE_DESCRIPTION="NVIDIA GeForce RTX 4080" \
+    D3DM_ENABLE_METALFX=1 \
+    WINEDLLOVERRIDES='dxgi,d3d10,d3d10core,d3d11,d3d12=n,b;nvapi,nvapi64,nvngx=b' \
+    "$WINE" /path/to/application.exe
+```
+
+The NVIDIA example also requires the matching NVAPI/NVNGX PE files and registry setup supplied by the selected D3DMetal runtime package.
+
+Run a D3D10 or D3D11 application entirely through DXMT:
+
+```sh
+env GRAPHICS_BACKEND=dxmt \
+    WINEDLLOVERRIDES='dxgi,d3d10,d3d10core,d3d11,d3d12,winemetal=b' \
+    "$WINE" /path/to/application.exe
+```
+
+Enable DXMT's NVIDIA extension path when a game requires it:
+
+```sh
+env GRAPHICS_BACKEND=dxmt \
+    DXMT_ENABLE_NVEXT=1 \
+    WINEDLLOVERRIDES='dxgi,d3d10,d3d10core,d3d11,d3d12,winemetal=b' \
+    "$WINE" /path/to/game.exe
+```
+
+When `DXMT_CEF_RUNTIME_DIR` points to a complete runtime, WineForge automatically routes only its built-in exact-path Rockstar launcher processes through DXMT-CEF. The game continues to use the global `GRAPHICS_BACKEND`; no application list, registry value, or additional environment switch is required.
+
+WFUSync remains independent of graphics selection and can be enabled for any of these commands with `WINEWFUSYNC=1`.
+
 ## Supported Launchers
 
 Launcher compatibility is tested as part of the WineForge game-focused runtime path.
@@ -131,6 +201,12 @@ Steam is supported for storefront, library, download, and game launch workflows.
 Epic Games Launcher is supported for storefront, download, install, and game launch workflows.
 
 Known issue: opening the Friends/social panel can show a black surface in the Store UI. The launcher otherwise remains functional. This appears tied to Epic's accelerated browser surface; WineForge does not currently have a reliable launcher-side switch to disable that GPU acceleration path.
+
+### Rockstar Games Launcher
+
+Rockstar Games Launcher and Social Club are supported for installation, updates, sign-in, service startup, and game launch workflows. The standalone launcher and the Epic Games Launcher to Rockstar Games Launcher path have been validated with Red Dead Redemption 2.
+
+Selected Rockstar CEF processes use the isolated [DXMT-CEF](https://github.com/Alien4042x/dxmt-cef) runtime, while the launched game keeps the configured global graphics backend.
 
 ## WFUSync
 
