@@ -2953,6 +2953,9 @@ static BOOL check_queue_bits( UINT wake_mask, UINT changed_mask, UINT signal_bit
  */
 static int peek_message( MSG *msg, const struct peek_message_filter *filter )
 {
+    /* WineForge-Internal: win32u-composited-paint-fairness-v1. */
+    static __thread HWND repeated_paint_hwnd;
+    static __thread unsigned int repeated_paint_count;
     LRESULT result;
     HWND hwnd = filter->hwnd;
     UINT first = filter->first, last = filter->last, flags = filter->flags;
@@ -3229,6 +3232,36 @@ static int peek_message( MSG *msg, const struct peek_message_filter *filter )
             if (info.msg.message == WM_TIMER || info.msg.message == WM_SYSTIMER)
             {
                 if (!(flags & PM_NOYIELD) && idle_event) NtSetEvent( idle_event, NULL );
+            }
+            /* WineForge-Internal: win32u-composited-paint-fairness-v1. */
+            if (info.msg.message == WM_PAINT && (flags & PM_REMOVE) &&
+                first == 0 && last == ~0U && (flags & PM_QS_PAINT))
+            {
+                if (info.msg.hwnd == repeated_paint_hwnd) repeated_paint_count++;
+                else
+                {
+                    repeated_paint_hwnd = info.msg.hwnd;
+                    repeated_paint_count = 1;
+                }
+
+                if (repeated_paint_count >= 8)
+                {
+                    UINT exstyle = get_window_long( info.msg.hwnd, GWL_EXSTYLE );
+
+                    repeated_paint_count = 0;
+                    if (exstyle & WS_EX_COMPOSITED)
+                    {
+                        send_message( info.msg.hwnd, info.msg.message,
+                                      info.msg.wParam, info.msg.lParam );
+                        flags &= ~PM_QS_PAINT;
+                        continue;
+                    }
+                }
+            }
+            else if (info.msg.message != WM_PAINT)
+            {
+                repeated_paint_hwnd = 0;
+                repeated_paint_count = 0;
             }
             *msg = info.msg;
             msg->pt = point_phys_to_win_dpi( info.msg.hwnd, info.msg.pt );

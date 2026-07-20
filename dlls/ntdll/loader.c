@@ -1321,6 +1321,18 @@ static BOOL is_dll_native_subsystem( LDR_DATA_TABLE_ENTRY *mod, const IMAGE_NT_H
     return TRUE;
 }
 
+static void set_thread_tls_block( TEB *teb, void **pointers )
+{
+    teb->ThreadLocalStoragePointer = pointers;
+#ifdef __x86_64__
+    /* WINEFORGE_INTERNAL: macOS-x86_64-gs-shadow-tls
+     * macOS x86_64 keeps Windows TEB fields in a pthread-owned GS shadow
+     * recorded by signal_x86_64.c. See the Rockstar patch README for removal. */
+    if (teb->Instrumentation[0])
+        ((TEB *)teb->Instrumentation[0])->ThreadLocalStoragePointer = pointers;
+#endif
+}
+
 /*************************************************************************
  *		alloc_tls_slot
  *
@@ -1391,7 +1403,7 @@ static BOOL alloc_tls_slot( LDR_DATA_TABLE_ENTRY *mod )
 
             if (!new) return FALSE;
             if (old) memcpy( new, old, old_module_count * sizeof(*new) );
-            teb->ThreadLocalStoragePointer = new;
+            set_thread_tls_block( teb, new );
             TRACE( "thread %04lx tls block %p -> %p\n", HandleToULong(teb->ClientId.UniqueThread), old, new );
             /* FIXME: can't free old block here, should be freed at thread exit */
         }
@@ -1636,7 +1648,7 @@ static NTSTATUS alloc_thread_tls(void)
 
         TRACE( "slot %u: %u/%lu bytes at %p\n", i, size, dir->SizeOfZeroFill, pointers[i] );
     }
-    NtCurrentTeb()->ThreadLocalStoragePointer = pointers;
+    set_thread_tls_block( NtCurrentTeb(), pointers );
     return STATUS_SUCCESS;
 }
 
@@ -4002,7 +4014,7 @@ void WINAPI LdrShutdownThread(void)
     RtlAcquirePebLock();
     if ((pointers = NtCurrentTeb()->ThreadLocalStoragePointer))
     {
-        NtCurrentTeb()->ThreadLocalStoragePointer = NULL;
+        set_thread_tls_block( NtCurrentTeb(), NULL );
         for (i = 0; i < tls_module_count; i++) RtlFreeHeap( GetProcessHeap(), 0, pointers[i] );
         RtlFreeHeap( GetProcessHeap(), 0, pointers );
     }

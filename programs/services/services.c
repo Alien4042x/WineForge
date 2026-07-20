@@ -41,7 +41,10 @@ WINE_DEFAULT_DEBUG_CHANNEL(service);
 
 struct scmdatabase *active_database;
 
-DWORD service_pipe_timeout = 10000;
+/* WineForge-Internal: launcher-compat/rockstar-service-pipe-timeout-v1.
+ * RockstarService under Rosetta can take longer than the default 10 seconds
+ * to connect back to the SCM pipe. */
+DWORD service_pipe_timeout = 40000;
 DWORD service_kill_timeout = 60000;
 static DWORD default_preshutdown_timeout = 180000;
 static DWORD autostart_delay = 120000;
