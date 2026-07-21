@@ -85,7 +85,6 @@ BOOL is_d3dmetal_module_name( const char *path )
            !strcasecmp( name, "d3d10core.dll" ) ||
            !strcasecmp( name, "d3d11.dll" ) ||
            !strcasecmp( name, "d3d12.dll" ) ||
-           !strcasecmp( name, "atidxx64.dll" ) ||
            !strcasecmp( name, "nvapi.dll" ) ||
            !strcasecmp( name, "nvapi64.dll" ) ||
            !strcasecmp( name, "nvngx.dll" ) ||
