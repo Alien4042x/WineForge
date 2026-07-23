@@ -59,6 +59,7 @@ SOURCES = \
 	unix/loader.c \
 	unix/loadorder.c \
 	unix/process.c \
+	unix/wfdxcompat_loader.c \
 	unix/registry.c \
 	unix/security.c \
 	unix/serial.c \

@@ -3157,6 +3157,69 @@ static NTSTATUS get_env_var( const WCHAR *name, SIZE_T extra, UNICODE_STRING *re
     }
 }
 
+#ifdef _WIN64
+static NTSTATUS open_wfdxcompat_backend_alias( const WCHAR *name, UNICODE_STRING *nt_name,
+                                               WINE_MODREF **pwm, HANDLE *mapping,
+                                               SECTION_IMAGE_INFORMATION *image_info,
+                                               struct file_id *id )
+{
+    static const WCHAR unix_prefixW[] = L"\\??\\unix";
+    static const WCHAR runtime_envW[] = L"WFDXCOMPAT_RUNTIME_DIR";
+    static const WCHAR d3dmetal_envW[] = L"D3DMETAL_RUNTIME_DIR";
+    static const WCHAR runtime_nameW[] = L"/wfdxcompat";
+    static const WCHAR d3d12_suffixW[] = L"/x86_64-windows/wfdxbackend-d3d12.dll";
+    UNICODE_STRING runtime;
+    WCHAR *end, *slash;
+    SIZE_T length;
+    NTSTATUS status;
+    BOOL derived = FALSE;
+
+    if (wcsicmp( name, L"wfdxbackend-d3d12.dll" )) return STATUS_DLL_NOT_FOUND;
+    if (get_env_var( runtime_envW, ARRAY_SIZE(runtime_nameW) + ARRAY_SIZE(d3d12_suffixW), &runtime ))
+    {
+        if ((status = get_env_var( d3dmetal_envW,
+                                   ARRAY_SIZE(runtime_nameW) + ARRAY_SIZE(d3d12_suffixW), &runtime )))
+            return status == STATUS_VARIABLE_NOT_FOUND ? STATUS_DLL_NOT_FOUND : status;
+        derived = TRUE;
+    }
+
+    end = runtime.Buffer + runtime.Length / sizeof(WCHAR);
+    while (end > runtime.Buffer + 1 && end[-1] == '/') *--end = 0;
+    if (derived)
+    {
+        if (!(slash = wcsrchr( runtime.Buffer, '/' )) || slash == runtime.Buffer)
+        {
+            RtlFreeUnicodeString( &runtime );
+            return STATUS_DLL_NOT_FOUND;
+        }
+        *slash = 0;
+        wcscat( runtime.Buffer, runtime_nameW );
+    }
+
+    length = wcslen( unix_prefixW ) + wcslen( runtime.Buffer ) + wcslen( d3d12_suffixW );
+    if (!(nt_name->Buffer = RtlAllocateHeap( GetProcessHeap(), 0,
+                                             (length + 1) * sizeof(WCHAR) )))
+    {
+        RtlFreeUnicodeString( &runtime );
+        return STATUS_NO_MEMORY;
+    }
+    wcscpy( nt_name->Buffer, unix_prefixW );
+    wcscat( nt_name->Buffer, runtime.Buffer );
+    wcscat( nt_name->Buffer, d3d12_suffixW );
+    nt_name->Length = length * sizeof(WCHAR);
+    nt_name->MaximumLength = (length + 1) * sizeof(WCHAR);
+    RtlFreeUnicodeString( &runtime );
+
+    status = open_dll_file( nt_name, pwm, mapping, image_info, id );
+    if (status == STATUS_DLL_NOT_FOUND)
+    {
+        RtlFreeUnicodeString( nt_name );
+        nt_name->Buffer = NULL;
+    }
+    return status;
+}
+#endif
+
 
 /***********************************************************************
  *	find_builtin_without_file
@@ -3332,6 +3395,13 @@ static NTSTATUS find_dll_file( const WCHAR *load_path, const WCHAR *libname, UNI
     /* Win 7/2008R2 and up seem to re-enable WoW64 FS redirection when loading libraries */
     RtlWow64EnableFsRedirectionEx( 0, &wow64_old_value );
 
+#ifdef _WIN64
+    if (!contains_path( libname ) &&
+        (status = open_wfdxcompat_backend_alias( libname, nt_name, pwm, mapping,
+                                                 image_info, id )) != STATUS_DLL_NOT_FOUND)
+        goto done;
+#endif
+
     if (RtlDetermineDosPathNameType_U( libname ) == RtlPathTypeRelative)
     {
         status = search_dll_file( load_path, libname, nt_name, pwm, mapping, image_info, id );
@@ -3341,6 +3411,7 @@ static NTSTATUS find_dll_file( const WCHAR *load_path, const WCHAR *libname, UNI
     else if (!(status = RtlDosPathNameToNtPathName_U_WithStatus( libname, nt_name, NULL, NULL )))
         status = open_dll_file( nt_name, pwm, mapping, image_info, id );
 
+done:
     if (status == STATUS_NOT_SUPPORTED) status = STATUS_INVALID_IMAGE_FORMAT;
 
     RtlFreeHeap( GetProcessHeap(), 0, fullname );

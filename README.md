@@ -126,6 +126,40 @@ WineForge can route selected launcher processes to a separate [DXMT-CEF](https:/
 
 DXMT and DXMT-CEF runtime binaries are maintained separately and are not bundled in this source repository.
 
+### WineForge DXCompat
+
+WineForge DXCompat (`WFDXCompat`) is an optional external compatibility
+frontend placed in front of the process-selected D3DMetal backend. It fills
+focused DirectX interfaces and resource behavior that D3DMetal does not yet
+provide, while forwarding supported graphics behavior to the selected
+backend.
+
+The first implementation extends the D3D12 path with missing video-resource,
+plane-copy, barrier, and resource-lifetime behavior. The project is structured
+so additional focused frontend modules can be added as further D3DMetal
+compatibility gaps are identified and verified. WFDXCompat activates only when
+D3DMetal is the selected process backend; processes without the matching
+external frontend keep their existing graphics path.
+
+The external runtime is not bundled in this source repository. Its current
+layout is:
+
+```text
+lib/wfdxcompat/
+  x86_64-windows/
+    d3d12.dll
+    wfdxbackend-d3d12.dll
+```
+
+WineForge reads an explicit `WFDXCOMPAT_RUNTIME_DIR`, or derives the sibling
+`lib/wfdxcompat` directory from `D3DMETAL_RUNTIME_DIR`. If the frontend is
+absent, WineForge retains the normal D3DMetal D3D12 path.
+
+As its frontend coverage grows, WFDXCompat may also become suitable for
+Direct3D-based launcher surfaces that currently use the separate DXMT-CEF
+runtime. DXMT-CEF remains the current launcher path while that coverage is
+developed and validated.
+
 ## Running a Local Build
 
 The examples below assume that the Wine build and the external graphics runtimes have already been installed. The packaging layer must make the matching PE DLL and Unix library directories available through `WINEDLLPATH`, `DYLD_LIBRARY_PATH`, or equivalent launcher setup.
@@ -138,6 +172,7 @@ export WINEPREFIX=/path/to/prefix
 export D3DMETAL_RUNTIME_DIR=/path/to/lib/d3dmetal
 export DXMT_RUNTIME_DIR=/path/to/lib/dxmt
 export DXMT_CEF_RUNTIME_DIR=/path/to/lib/dxmt-cef
+export WFDXCOMPAT_RUNTIME_DIR=/path/to/lib/wfdxcompat
 ```
 
 Run with D3DMetal using the AMD / FidelityFX identity:

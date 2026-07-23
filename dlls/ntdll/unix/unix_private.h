@@ -346,6 +346,11 @@ extern BOOL is_dxmt_module_name( const char *path );
 extern BOOL is_dxmt_module_basename( const WCHAR *name );
 extern char *resolve_dxmt_pe_path( const char *module, USHORT machine );
 extern char *resolve_dxmt_unixlib_path( const char *path );
+extern BOOL is_wfdxcompat_frontend_module_name( const char *path );
+extern BOOL is_wfdxcompat_backend_module_name( const char *path );
+extern char *resolve_wfdxcompat_frontend_pe_path( const char *module, USHORT machine );
+extern char *resolve_wfdxcompat_backend_pe_path( const char *module );
+extern char *resolve_wfdxcompat_backend_unixlib_path( const char *module );
 extern NTSTATUS load_builtin_unixlib_now( void *module );
 extern NTSTATUS set_builtin_unixlib_name( void *module, const char *name );
 

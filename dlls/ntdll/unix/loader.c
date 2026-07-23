@@ -1478,6 +1478,8 @@ static NTSTATUS find_builtin_dll( UNICODE_STRING *nt_name, ANSI_STRING *exp_name
 #if defined(__APPLE__) && defined(__x86_64__)
     BOOL d3dmetal_runtime_pe = FALSE;
     BOOL dxmt_runtime_pe = FALSE;
+    BOOL wfdxcompat_runtime_pe = FALSE;
+    BOOL wfdxcompat_backend_pe = FALSE;
 #endif
 
     InitializeObjectAttributes( &attr, nt_name, 0, 0, NULL );
@@ -1531,6 +1533,52 @@ static NTSTATUS find_builtin_dll( UNICODE_STRING *nt_name, ANSI_STRING *exp_name
         TRACE( "Steam frontend using native CEF Vulkan loader for %s\n", debugstr_us(nt_name) );
         status = STATUS_DLL_NOT_FOUND;
         goto done;
+    }
+
+    /* WineForge-Internal: load DXCompat before the selected D3DMetal backend. */
+    if (d3dmetal_graphics_backend_enabled() &&
+        is_wfdxcompat_frontend_module_name( file + pos + 1 ))
+    {
+        char *wfdxcompat_pe = resolve_wfdxcompat_frontend_pe_path( file + pos + 1, search_machine );
+
+        if (wfdxcompat_pe)
+        {
+            status = open_builtin_pe_file( wfdxcompat_pe, &attr, module, size_ptr, image_info,
+                                           limit_low, limit_high, load_machine, prefer_native, offset );
+            if (status != STATUS_DLL_NOT_FOUND)
+            {
+                TRACE( "DXCompat frontend PE %s for %s -> %#lx\n",
+                       debugstr_a(wfdxcompat_pe), debugstr_us(nt_name), (long)status );
+                free( wfdxcompat_pe );
+                ptr = file + pos;
+                wfdxcompat_runtime_pe = TRUE;
+                goto done;
+            }
+            free( wfdxcompat_pe );
+        }
+    }
+
+    /* The private alias lets the frontend load the selected backend without recursion. */
+    if (is_wfdxcompat_backend_module_name( file + pos + 1 ))
+    {
+        char *backend_pe = resolve_wfdxcompat_backend_pe_path( file + pos + 1 );
+
+        if (backend_pe)
+        {
+            status = open_builtin_pe_file( backend_pe, &attr, module, size_ptr, image_info,
+                                           limit_low, limit_high, load_machine, prefer_native, offset );
+            if (status != STATUS_DLL_NOT_FOUND)
+            {
+                TRACE( "DXCompat backend alias %s -> %s -> %#lx\n", debugstr_us(nt_name),
+                       debugstr_a(backend_pe), (long)status );
+                free( backend_pe );
+                ptr = file + pos;
+                d3dmetal_runtime_pe = TRUE;
+                wfdxcompat_backend_pe = TRUE;
+                goto done;
+            }
+            free( backend_pe );
+        }
     }
 
     /* WineForge-Internal: the selected DXMT runtime must win over Wine's build tree. */
@@ -1643,7 +1691,9 @@ done:
 
         strcpy( ext, ".so" );
 #if defined(__APPLE__) && defined(__x86_64__)
-        if (is_d3dmetal_unixlib_name( ptr ))
+        if (wfdxcompat_backend_pe)
+            d3dmetal_unixlib = resolve_wfdxcompat_backend_unixlib_path( ptr );
+        else if (!wfdxcompat_runtime_pe && is_d3dmetal_unixlib_name( ptr ))
             d3dmetal_unixlib = resolve_d3dmetal_unixlib_path( ptr );
         if (d3dmetal_unixlib) unixlib_path = d3dmetal_unixlib;
         if (dxmt_runtime_pe)
@@ -1651,11 +1701,13 @@ done:
         if (dxmt_unixlib) unixlib_path = dxmt_unixlib;
 #endif
 #if defined(__APPLE__) && defined(__x86_64__)
-        if ((!d3dmetal_runtime_pe && !dxmt_runtime_pe) || d3dmetal_unixlib || dxmt_unixlib)
+        if ((!d3dmetal_runtime_pe && !dxmt_runtime_pe && !wfdxcompat_runtime_pe) ||
+            d3dmetal_unixlib || dxmt_unixlib)
 #endif
             set_builtin_unixlib_name( *module, unixlib_path );
 #if defined(__APPLE__) && defined(__x86_64__)
-        if (d3dmetal_graphics_backend_enabled() && is_d3dmetal_unixlib_name( unixlib_path ))
+        if (!wfdxcompat_runtime_pe && d3dmetal_graphics_backend_enabled() &&
+            is_d3dmetal_unixlib_name( unixlib_path ))
         {
             NTSTATUS unix_status;
 
