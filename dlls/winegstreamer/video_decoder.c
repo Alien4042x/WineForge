@@ -20,6 +20,7 @@
 
 #include "gst_private.h"
 
+#include "d3d11.h"
 #include "mfapi.h"
 #include "mferror.h"
 #include "mfobjects.h"
@@ -457,6 +458,32 @@ static HRESULT init_allocator(struct video_decoder *decoder)
     return S_OK;
 }
 
+/* WineForge-Internal: mf-d3d11-video-output-capability-v1. */
+static BOOL d3d11_manager_supports_video_output(IMFDXGIDeviceManager *manager)
+{
+    ID3D11Device *device = NULL;
+    UINT nv12_support = 0, p010_support = 0;
+    HANDLE handle;
+    HRESULT hr;
+
+    if (FAILED(IMFDXGIDeviceManager_OpenDeviceHandle(manager, &handle)))
+        return TRUE;
+
+    hr = IMFDXGIDeviceManager_GetVideoService(manager, handle, &IID_ID3D11Device, (void **)&device);
+    IMFDXGIDeviceManager_CloseDeviceHandle(manager, handle);
+    if (FAILED(hr))
+        return TRUE;
+
+    hr = ID3D11Device_CheckFormatSupport(device, DXGI_FORMAT_NV12, &nv12_support);
+    if (FAILED(hr)) nv12_support = 0;
+    hr = ID3D11Device_CheckFormatSupport(device, DXGI_FORMAT_P010, &p010_support);
+    if (FAILED(hr)) p010_support = 0;
+    ID3D11Device_Release(device);
+
+    return (nv12_support & D3D11_FORMAT_SUPPORT_TEXTURE2D) ||
+            (p010_support & D3D11_FORMAT_SUPPORT_TEXTURE2D);
+}
+
 static void uninit_allocator(struct video_decoder *decoder)
 {
     IMFVideoSampleAllocatorEx_UninitializeSampleAllocator(decoder->allocator);
@@ -841,6 +868,25 @@ static HRESULT WINAPI transform_ProcessMessage(IMFTransform *iface, MFT_MESSAGE_
     switch (message)
     {
     case MFT_MESSAGE_SET_D3D_MANAGER:
+        if (param)
+        {
+            IMFDXGIDeviceManager *manager;
+
+            if (FAILED(IUnknown_QueryInterface((IUnknown *)param, &IID_IMFDXGIDeviceManager,
+                    (void **)&manager)))
+                return E_NOINTERFACE;
+            if (!d3d11_manager_supports_video_output(manager))
+            {
+                IMFDXGIDeviceManager_Release(manager);
+                if (FAILED(hr = IMFVideoSampleAllocatorEx_SetDirectXManager(decoder->allocator, NULL)))
+                    return hr;
+                uninit_allocator(decoder);
+                decoder->output_info.dwFlags |= MFT_OUTPUT_STREAM_PROVIDES_SAMPLES;
+                return E_NOINTERFACE;
+            }
+            IMFDXGIDeviceManager_Release(manager);
+        }
+
         if (FAILED(hr = IMFVideoSampleAllocatorEx_SetDirectXManager(decoder->allocator, (IUnknown *)param)))
             return hr;
 
