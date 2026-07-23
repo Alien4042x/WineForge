@@ -497,16 +497,13 @@ static BOOL epic_eosh_refresh_progress_from_logs(void)
 
     FindClose( find );
     if (!found) return FALSE;
-    if (epic_eosh_progress_is_user_cancelled( epic_eosh_progress_json ))
-    {
-        epic_eosh_active_operation_id[0] = 0;
-        return FALSE;
-    }
 
     if (!epic_eosh_extract_json_string( epic_eosh_progress_json, strlen(epic_eosh_progress_json),
                                         "\"state\"", epic_eosh_progress_state,
                                         sizeof(epic_eosh_progress_state) ))
         epic_eosh_progress_state[0] = 0;
+    if (epic_eosh_progress_is_user_cancelled( epic_eosh_progress_json ))
+        lstrcpynA( epic_eosh_progress_state, "Completed", sizeof(epic_eosh_progress_state) );
     if (!epic_eosh_extract_json_number( epic_eosh_progress_json, strlen(epic_eosh_progress_json),
                                         "\"updateProgress\"", epic_eosh_progress_update,
                                         sizeof(epic_eosh_progress_update) ))
@@ -801,7 +798,12 @@ static void epic_eosh_maybe_shim_http_response( SOCKET s, WSABUF *buffers, DWORD
 
     len = min( buffers[0].len, (DWORD)*byte_count );
     type = epic_eosh_get_socket_request_type( s );
-    epic_eosh_note_operation_id( buffers[0].buf, len );
+    if (type == EPIC_EOSH_REQUEST_POST_INSTALL_OPERATION)
+    {
+        epic_eosh_note_operation_id( buffers[0].buf, len );
+        epic_eosh_set_socket_request_type( s, EPIC_EOSH_REQUEST_NONE );
+        return;
+    }
     if (type == EPIC_EOSH_REQUEST_GET_INSTALLATIONS)
     {
         epic_eosh_replace_installations_response( s, buffers[0].buf, buffers[0].len, byte_count );
