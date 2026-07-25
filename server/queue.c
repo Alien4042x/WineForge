@@ -160,65 +160,25 @@ static void timer_callback( void *private );
 
 static const struct object_ops msg_queue_ops =
 {
-    sizeof(struct msg_queue),  /* size */
-    &no_type,                  /* type */
-    msg_queue_dump,            /* dump */
-    NULL,                      /* add_queue */
-    NULL,                      /* remove_queue */
-    NULL,                      /* signaled */
-    NULL,                      /* satisfied */
-    no_signal,                 /* signal */
-    no_get_fd,                 /* get_fd */
-    msg_queue_get_sync,        /* get_sync */
-    default_map_access,        /* map_access */
-    default_get_sd,            /* get_sd */
-    default_set_sd,            /* set_sd */
-    no_get_full_name,          /* get_full_name */
-    no_lookup_name,            /* lookup_name */
-    no_link_name,              /* link_name */
-    NULL,                      /* unlink_name */
-    no_open_file,              /* open_file */
-    no_kernel_obj_list,        /* get_kernel_obj_list */
-    no_close_handle,           /* close_handle */
-    msg_queue_destroy          /* destroy */
+    .size     = sizeof(struct msg_queue),
+    .type     = &no_type,
+    .dump     = msg_queue_dump,
+    .get_sync = msg_queue_get_sync,
+    .destroy  = msg_queue_destroy,
 };
 
 static const struct fd_ops msg_queue_fd_ops =
 {
-    NULL,                        /* get_poll_events */
-    msg_queue_poll_event,        /* poll_event */
-    NULL,                        /* flush */
-    NULL,                        /* get_fd_type */
-    NULL,                        /* ioctl */
-    NULL,                        /* queue_async */
-    NULL,                        /* reselect_async */
-    NULL                         /* cancel async */
+    .poll_event = msg_queue_poll_event,
 };
 
 
 static const struct object_ops thread_input_ops =
 {
-    sizeof(struct thread_input),  /* size */
-    &no_type,                     /* type */
-    thread_input_dump,            /* dump */
-    no_add_queue,                 /* add_queue */
-    NULL,                         /* remove_queue */
-    NULL,                         /* signaled */
-    NULL,                         /* satisfied */
-    no_signal,                    /* signal */
-    no_get_fd,                    /* get_fd */
-    default_get_sync,             /* get_sync */
-    default_map_access,           /* map_access */
-    default_get_sd,               /* get_sd */
-    default_set_sd,               /* set_sd */
-    no_get_full_name,             /* get_full_name */
-    no_lookup_name,               /* lookup_name */
-    no_link_name,                 /* link_name */
-    NULL,                         /* unlink_name */
-    no_open_file,                 /* open_file */
-    no_kernel_obj_list,           /* get_kernel_obj_list */
-    no_close_handle,              /* close_handle */
-    thread_input_destroy          /* destroy */
+    .size    = sizeof(struct thread_input),
+    .type    = &no_type,
+    .dump    = thread_input_dump,
+    .destroy = thread_input_destroy,
 };
 
 /* pointer to input structure of foreground thread */

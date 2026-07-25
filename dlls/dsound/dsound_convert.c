@@ -47,70 +47,6 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(dsound);
 
-static void get8(const IDirectSoundBufferImpl *dsb, BYTE *base, float *dst, unsigned samples, DWORD channel)
-{
-    DWORD channels = dsb->pwfx->nChannels;
-    const BYTE *buf = base + channel;
-    int i;
-
-    for (i = 0; i < samples; ++i)
-        dst[i] = (buf[i * channels] - 0x80) / (float)0x80;
-}
-
-static void get16(const IDirectSoundBufferImpl *dsb, BYTE *base, float *dst, unsigned samples, DWORD channel)
-{
-    DWORD channels = dsb->pwfx->nChannels;
-    const BYTE *buf = base + 2 * channel;
-    const SHORT *sbuf = (const SHORT*)(buf);
-    int i;
-
-    for (i = 0; i < samples; ++i)
-        dst[i] = sbuf[i * channels] / (float)0x8000;
-}
-
-static void get24(const IDirectSoundBufferImpl *dsb, BYTE *base, float *dst, unsigned samples, DWORD channel)
-{
-    DWORD channels = dsb->pwfx->nChannels;
-    const BYTE *buf = base + 3 * channel;
-    int i;
-
-    for (i = 0; i < samples; ++i) {
-        /* The next expression deliberately has an overflow for buf[2] >= 0x80,
-           this is how negative values are made.
-         */
-        LONG sample =
-                (buf[i * channels * 3 + 0] << 8) |
-                (buf[i * channels * 3 + 1] << 16) |
-                (buf[i * channels * 3 + 2] << 24);
-        dst[i] = sample / (float)0x80000000U;
-    }
-}
-
-static void get32(const IDirectSoundBufferImpl *dsb, BYTE *base, float *dst, unsigned samples, DWORD channel)
-{
-    DWORD channels = dsb->pwfx->nChannels;
-    const BYTE *buf = base + 4 * channel;
-    const LONG *sbuf = (const LONG*)(buf);
-    int i;
-
-    for (i = 0; i < samples; ++i)
-        dst[i] = sbuf[i * channels] / (float)0x80000000U;
-}
-
-const bitsgetfunc getbpp[4] = {get8, get16, get24, get32};
-
-void getieee32(const IDirectSoundBufferImpl *dsb, BYTE *base, float *dst, unsigned samples, DWORD channel)
-{
-    DWORD channels = dsb->pwfx->nChannels;
-    const BYTE *buf = base + 4 * channel;
-    const float *sbuf = (const float*)(buf);
-    int i;
-
-    for (i = 0; i < samples; ++i)
-        /* The value will be clipped later, when put into some non-float buffer */
-        dst[i] = sbuf[i * channels];
-}
-
 void putieee32(const IDirectSoundBufferImpl *dsb, DWORD pos, DWORD channel, float value)
 {
     BYTE *buf = (BYTE *)dsb->device->tmp_buffer;
@@ -178,6 +114,73 @@ void put_mono(const IDirectSoundBufferImpl *dsb, DWORD pos, DWORD channel, float
 {
     /* XXX: does Windows include LFE into the mix? */
     dsb->put_aux(dsb, pos, 0, value);
+}
+
+void put_mono2surround71(const IDirectSoundBufferImpl *dsb, DWORD pos, DWORD channel, float value)
+{
+    dsb->put_aux(dsb, pos, 2, value); /* Front centre */
+
+    dsb->put_aux(dsb, pos, 0, 0.0f); /* Mute front left */
+    dsb->put_aux(dsb, pos, 1, 0.0f); /* Mute front right */
+    dsb->put_aux(dsb, pos, 3, 0.0f); /* Mute LFE */
+    dsb->put_aux(dsb, pos, 4, 0.0f); /* Mute back left */
+    dsb->put_aux(dsb, pos, 5, 0.0f); /* Mute back right */
+    dsb->put_aux(dsb, pos, 6, 0.0f); /* Mute side left */
+    dsb->put_aux(dsb, pos, 7, 0.0f); /* Mute side right */
+}
+
+void put_stereo2surround71(const IDirectSoundBufferImpl *dsb, DWORD pos, DWORD channel, float value)
+{
+    if (channel == 0) { /* Left */
+        dsb->put_aux(dsb, pos, 0, value); /* Front left */
+
+        dsb->put_aux(dsb, pos, 2, 0.0f); /* Mute front centre */
+        dsb->put_aux(dsb, pos, 3, 0.0f); /* Mute LFE */
+        dsb->put_aux(dsb, pos, 4, 0.0f); /* Mute back left */
+        dsb->put_aux(dsb, pos, 5, 0.0f); /* Mute back right */
+        dsb->put_aux(dsb, pos, 6, 0.0f); /* Mute side left */
+        dsb->put_aux(dsb, pos, 7, 0.0f); /* Mute side right */
+    } else if (channel == 1) { /* Right */
+        dsb->put_aux(dsb, pos, 1, value); /* Front right */
+    }
+}
+
+void put_quad2surround71(const IDirectSoundBufferImpl *dsb, DWORD pos, DWORD channel, float value)
+{
+    if (channel == 0) { /* Front left */
+        dsb->put_aux(dsb, pos, 0, value); /* Front left */
+
+        dsb->put_aux(dsb, pos, 2, 0.0f); /* Mute front center */
+        dsb->put_aux(dsb, pos, 3, 0.0f); /* Mute LFE */
+        dsb->put_aux(dsb, pos, 6, 0.0f); /* Mute side left */
+        dsb->put_aux(dsb, pos, 7, 0.0f); /* Mute side right */
+    } else if (channel == 1) { /* Front right */
+        dsb->put_aux(dsb, pos, 1, value); /* Front right */
+    } else if (channel == 2) { /* Rear left */
+        dsb->put_aux(dsb, pos, 4, value); /* Rear left */
+    } else if (channel == 3) { /* Rear right */
+        dsb->put_aux(dsb, pos, 5, value); /* Rear right */
+    }
+}
+
+void put_surround512surround71(const IDirectSoundBufferImpl *dsb, DWORD pos, DWORD channel, float value)
+{
+    if (channel == 0) { /* Front left */
+        dsb->put_aux(dsb, pos, 0, value); /* Front left */
+
+        dsb->put_aux(dsb, pos, 6, 0.0f); /* Mute side left */
+        dsb->put_aux(dsb, pos, 7, 0.0f); /* Mute side right */
+    } else if (channel == 1) { /* Front right */
+        dsb->put_aux(dsb, pos, 1, value); /* Front right */
+    } else if (channel == 2) { /* Front center */
+        dsb->put_aux(dsb, pos, 2, value); /* Front center */
+    } else if (channel == 3) { /* LFE */
+        dsb->put_aux(dsb, pos, 3, value); /* LFE */
+    } else if (channel == 4) { /* Rear left */
+        dsb->put_aux(dsb, pos, 4, value); /* Rear left */
+    } else if (channel == 5) { /* Rear right */
+        dsb->put_aux(dsb, pos, 5, value); /* Rear right */
+    }
 }
 
 void put_surround512stereo(const IDirectSoundBufferImpl *dsb, DWORD pos, DWORD channel, float value)
