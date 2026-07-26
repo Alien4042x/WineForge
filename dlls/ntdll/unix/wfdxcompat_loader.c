@@ -74,7 +74,9 @@ BOOL is_wfdxcompat_frontend_module_name( const char *path )
 {
     const char *name = module_basename( path );
 
-    return !strcasecmp( name, "d3d12.dll" );
+    return !strcasecmp( name, "d3d12.dll" ) ||
+           (wfdxcompat_launcher_runtime_enabled() &&
+            !strcasecmp( name, "wfdx-launchers-v1.dll" ));
 }
 
 BOOL is_wfdxcompat_backend_module_name( const char *path )
@@ -83,6 +85,27 @@ BOOL is_wfdxcompat_backend_module_name( const char *path )
 
     return !strcasecmp( name, "wfdxbackend-d3d12.dll" ) ||
            !strcasecmp( name, "wfdxbackend-d3d12.so" );
+}
+
+BOOL wfdxcompat_launcher_runtime_available(void)
+{
+    char *runtime_dir, *companion = NULL;
+    char *backend_pe = NULL, *backend_unix = NULL;
+    BOOL available = FALSE;
+
+    if (!(runtime_dir = get_wfdxcompat_runtime_dir())) return FALSE;
+    if (asprintf( &companion, "%s/x86_64-windows/wfdx-launchers-v1.dll",
+                  runtime_dir ) == -1) companion = NULL;
+    backend_pe = resolve_d3dmetal_pe_path( "d3d11.dll" );
+    backend_unix = resolve_d3dmetal_unixlib_path( "d3d11.so" );
+    available = companion && backend_pe && backend_unix &&
+                !access( companion, R_OK ) &&
+                !access( backend_pe, R_OK ) && !access( backend_unix, R_OK );
+    free( backend_unix );
+    free( backend_pe );
+    free( companion );
+    free( runtime_dir );
+    return available;
 }
 
 char *resolve_wfdxcompat_frontend_pe_path( const char *module, USHORT machine )

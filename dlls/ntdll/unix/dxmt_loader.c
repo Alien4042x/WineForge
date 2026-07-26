@@ -38,7 +38,7 @@
 
 static const char *get_dxmt_runtime_dir(void)
 {
-    return getenv( dxmt_cef_runtime_enabled() ? "DXMT_CEF_RUNTIME_DIR" : "DXMT_RUNTIME_DIR" );
+    return getenv( "DXMT_RUNTIME_DIR" );
 }
 
 static const char *const dxmt_module_names[] =

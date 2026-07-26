@@ -122,9 +122,8 @@ Wine's Mono and Gecko handling remains upstream Wine behavior. This source tree 
 
 D3DMetal remains the primary D3D11 and D3D12 backend. WineForge also supports process-selectable [DXMT](https://github.com/3Shain/dxmt) for D3D10 and D3D11 applications and games. DXMT does not provide D3D12 support.
 
-WineForge can route selected launcher processes to a separate [DXMT-CEF](https://github.com/Alien4042x/dxmt-cef) runtime while the game keeps the configured global graphics backend. DXMT-CEF is a focused DXMT variant for CEF-based launchers that require D3D11 rendering unavailable through D3DMetal. It is currently used by Rockstar Games Launcher and Social Club Helper.
-
-DXMT and DXMT-CEF runtime binaries are maintained separately and are not bundled in this source repository.
+DXMT runtime binaries are maintained separately and are not bundled in this
+source repository.
 
 ### WineForge DXCompat
 
@@ -134,12 +133,12 @@ focused DirectX interfaces and resource behavior that D3DMetal does not yet
 provide, while forwarding supported graphics behavior to the selected
 backend.
 
-The first implementation extends the D3D12 path with missing video-resource,
-plane-copy, barrier, and resource-lifetime behavior. The project is structured
-so additional focused frontend modules can be added as further D3DMetal
-compatibility gaps are identified and verified. WFDXCompat activates only when
-D3DMetal is the selected process backend; processes without the matching
-external frontend keep their existing graphics path.
+The D3D12 frontend extends the backend with missing video-resource, plane-copy,
+barrier, and resource-lifetime behavior. A separate D3D11 companion supplies
+the context-state, GDI-surface, and D3D10 bridge behavior required by the
+validated Rockstar launcher path. WFDXCompat activates only when D3DMetal is
+the selected process backend; processes without the matching external module
+keep their existing graphics path.
 
 The external runtime is not bundled in this source repository. Its current
 layout is:
@@ -149,16 +148,12 @@ lib/wfdxcompat/
   x86_64-windows/
     d3d12.dll
     wfdxbackend-d3d12.dll
+    wfdx-launchers-v1.dll
 ```
 
 WineForge reads an explicit `WFDXCOMPAT_RUNTIME_DIR`, or derives the sibling
 `lib/wfdxcompat` directory from `D3DMETAL_RUNTIME_DIR`. If the frontend is
 absent, WineForge retains the normal D3DMetal D3D12 path.
-
-As its frontend coverage grows, WFDXCompat may also become suitable for
-Direct3D-based launcher surfaces that currently use the separate DXMT-CEF
-runtime. DXMT-CEF remains the current launcher path while that coverage is
-developed and validated.
 
 ## Running a Local Build
 
@@ -171,7 +166,6 @@ export WINE=/path/to/wineforge/bin/wine
 export WINEPREFIX=/path/to/prefix
 export D3DMETAL_RUNTIME_DIR=/path/to/lib/d3dmetal
 export DXMT_RUNTIME_DIR=/path/to/lib/dxmt
-export DXMT_CEF_RUNTIME_DIR=/path/to/lib/dxmt-cef
 export WFDXCOMPAT_RUNTIME_DIR=/path/to/lib/wfdxcompat
 ```
 
@@ -219,7 +213,10 @@ env GRAPHICS_BACKEND=dxmt \
     "$WINE" /path/to/game.exe
 ```
 
-When `DXMT_CEF_RUNTIME_DIR` points to a complete runtime, WineForge automatically routes only its built-in exact-path Rockstar launcher processes through DXMT-CEF. The game continues to use the global `GRAPHICS_BACKEND`; no application list, registry value, or additional environment switch is required.
+When the WFDXCompat launcher companion is available, WineForge routes only its
+built-in exact-path Rockstar launcher processes through D3DMetal with the
+companion enabled. The launched game continues to use the global
+`GRAPHICS_BACKEND`; no application list or registry value is required.
 
 WFUSync remains independent of graphics selection and can be enabled for any of these commands with `WINEWFUSYNC=1`.
 
@@ -241,7 +238,9 @@ Known issue: opening the Friends/social panel can show a black surface in the St
 
 Rockstar Games Launcher and Social Club are supported for installation, updates, sign-in, service startup, and game launch workflows. The standalone launcher and the Epic Games Launcher to Rockstar Games Launcher path have been validated with Red Dead Redemption 2.
 
-Selected Rockstar CEF processes use the isolated [DXMT-CEF](https://github.com/Alien4042x/dxmt-cef) runtime, while the launched game keeps the configured global graphics backend.
+Selected Rockstar launcher processes use the
+[WFDXCompat](https://github.com/Alien4042x/WFDXCompat) D3D11 companion with
+D3DMetal, while the launched game keeps the configured global graphics backend.
 
 ## WFUSync
 

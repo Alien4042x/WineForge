@@ -1035,7 +1035,7 @@ enum process_graphics_backend
 
 static enum process_graphics_backend process_graphics_backend;
 static BOOL process_uses_cef_software;
-static BOOL process_uses_dxmt_cef;
+static BOOL process_uses_wfdx_launchers;
 
 static BOOL parse_graphics_backend( const char *name, enum process_graphics_backend *backend )
 {
@@ -1077,22 +1077,19 @@ static BOOL ascii_path_ends_with_ci( const char *path, const char *suffix )
     return TRUE;
 }
 
-/* WineForge-Internal: dxmt-cef/process-routing-v1.
- * Keep this list limited to launchers proven to require the isolated runtime. */
-static const char *const dxmt_cef_app_paths[] =
+/* WineForge-Internal: wfdxcompat/rockstar-launcher-policy-v1. */
+static const char *const rockstar_launcher_app_paths[] =
 {
     "\\rockstar games\\launcher\\launcher.exe",
     "\\rockstar games\\social club\\socialclubhelper.exe",
 };
 
-static BOOL is_dxmt_cef_app( const char *image_path )
+static BOOL is_rockstar_launcher_app( const char *image_path )
 {
-    const char *runtime_dir = getenv( "DXMT_CEF_RUNTIME_DIR" );
     unsigned int i;
 
-    if (!runtime_dir || !runtime_dir[0]) return FALSE;
-    for (i = 0; i < ARRAY_SIZE(dxmt_cef_app_paths); i++)
-        if (ascii_path_ends_with_ci( image_path, dxmt_cef_app_paths[i] )) return TRUE;
+    for (i = 0; i < ARRAY_SIZE(rockstar_launcher_app_paths); i++)
+        if (ascii_path_ends_with_ci( image_path, rockstar_launcher_app_paths[i] )) return TRUE;
     return FALSE;
 }
 
@@ -1170,18 +1167,22 @@ static void init_process_graphics_backend( const WCHAR *image_path )
     process_uses_cef_software = configured_backend == PROCESS_GRAPHICS_BACKEND_DXMT &&
                                 is_software_cef_process();
 
-    /* WineForge-Internal: dxmt-cef/process-routing-v1. */
-    process_uses_dxmt_cef = is_dxmt_cef_app( image_pathA );
-    if (process_uses_dxmt_cef)
+    /* WineForge-Internal: wfdxcompat/rockstar-launcher-policy-v1. */
+    process_uses_wfdx_launchers = FALSE;
+    if (is_rockstar_launcher_app( image_pathA ))
     {
-        process_graphics_backend = PROCESS_GRAPHICS_BACKEND_DXMT;
+        process_graphics_backend = PROCESS_GRAPHICS_BACKEND_D3DMETAL;
+        if (wfdxcompat_launcher_runtime_available())
+            process_uses_wfdx_launchers = TRUE;
+        else
+            process_graphics_backend = configured_backend;
     }
 
     TRACE( "graphics backend for %s: global %s, selected %s, policy %s%s\n", image_nameA,
            backend && backend[0] ? backend : "wine",
            process_graphics_backend_name( process_graphics_backend ),
            process_uses_cef_software ? "cef-software" : "default",
-           process_uses_dxmt_cef ? ",dxmt-cef" : "" );
+           process_uses_wfdx_launchers ? ",wfdx-launchers" : "" );
 }
 
 BOOL d3dmetal_graphics_backend_enabled(void)
@@ -1206,9 +1207,9 @@ BOOL dxmt_graphics_backend_enabled(void)
     return backend && !strcmp( backend, "dxmt" );
 }
 
-BOOL dxmt_cef_runtime_enabled(void)
+BOOL wfdxcompat_launcher_runtime_enabled(void)
 {
-    return process_uses_dxmt_cef;
+    return process_uses_wfdx_launchers;
 }
 
 static BOOL cef_software_policy_enabled(void)
