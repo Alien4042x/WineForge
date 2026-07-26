@@ -339,9 +339,7 @@ static void wfdx_launcher_activate( WINE_MODREF *wm )
     init = init_proc;
     init_data.size = sizeof(init_data);
     init_data.abi_version = 1;
-    init_data.flags = 0x00000001;
-    if (!wfdx_launcher_env_present( L"WFDX_LAUNCHER_INTERPOSITION_ONLY" ))
-        init_data.flags |= 0x00000002 | 0x00000004;
+    init_data.flags = 0x00000001 | 0x00000002 | 0x00000004;
     init_data.reserved = 0;
     init_data.create_device = original_create;
     init_data.create_device_and_swapchain = original_create_sc;
