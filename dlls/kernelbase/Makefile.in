@@ -13,6 +13,7 @@ SOURCES = \
 	file.c \
 	kernelbase.rc \
 	loader.c \
+	launchers.c \
 	locale.c \
 	main.c \
 	memory.c \

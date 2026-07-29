@@ -30,6 +30,7 @@
 #include "processsnapshot.h"
 
 #include "kernelbase.h"
+#include "launchers.h"
 #include "wine/debug.h"
 #include "wine/condrv.h"
 
@@ -502,74 +503,6 @@ done:
     return ret;
 }
 
-/**********************************************************************
- *           CreateProcessInternalW   (kernelbase.@)
- */
-/* WineForge launcher-compat: path-gated CEF process arguments. */
-static BOOL launcher_string_contains_ci( const WCHAR *string, const WCHAR *needle )
-{
-    SIZE_T needle_len;
-
-    if (!string || !needle) return FALSE;
-    needle_len = lstrlenW( needle );
-    if (!needle_len) return TRUE;
-    for (; *string; string++)
-        if (!wcsnicmp( string, needle, needle_len )) return TRUE;
-    return FALSE;
-}
-
-static BOOL launcher_process_matches( const WCHAR *app_name, const WCHAR *cmd_line,
-                                      const WCHAR *exe_name, const WCHAR *path, const WCHAR *path_alt )
-{
-    return ((launcher_string_contains_ci( app_name, exe_name ) &&
-             (launcher_string_contains_ci( app_name, path ) || launcher_string_contains_ci( app_name, path_alt ))) ||
-            (launcher_string_contains_ci( cmd_line, exe_name ) &&
-             (launcher_string_contains_ci( cmd_line, path ) || launcher_string_contains_ci( cmd_line, path_alt ))));
-}
-
-static const WCHAR *get_launcher_cef_append_args( const WCHAR *app_name, const WCHAR *cmd_line )
-{
-    static const WCHAR steamwebhelperW[] = L"steamwebhelper.exe";
-    static const WCHAR steam_cef_pathW[] = L"\\Steam\\bin\\cef\\";
-    static const WCHAR steam_cef_path_altW[] = L"/Steam/bin/cef/";
-    static const WCHAR socialclub_helperW[] = L"SocialClubHelper.exe";
-    static const WCHAR socialclub_pathW[] = L"\\Rockstar Games\\Social Club\\";
-    static const WCHAR socialclub_path_altW[] = L"/Rockstar Games/Social Club/";
-    static const WCHAR crashpadW[] = L"--type=crashpad-handler";
-    static const WCHAR process_typeW[] = L"--type=";
-    static const WCHAR in_process_gpuW[] = L"--in-process-gpu";
-    static const WCHAR disable_gpuW[] = L"--disable-gpu";
-    static const WCHAR steam_argsW[] =
-        L" --no-sandbox"
-        L" --in-process-gpu"
-        L" --disable-gpu"
-        L" --disable-d3d11"
-        L" --enable-unsafe-swiftshader"
-        L" --use-gl=angle"
-        L" --use-angle=swiftshader";
-    static const WCHAR rockstar_argsW[] = L" --in-process-gpu";
-
-    if (launcher_process_matches( app_name, cmd_line, steamwebhelperW, steam_cef_pathW, steam_cef_path_altW ))
-    {
-        if (launcher_string_contains_ci( cmd_line, crashpadW ) ||
-            launcher_string_contains_ci( cmd_line, disable_gpuW ))
-            return NULL;
-        return steam_argsW;
-    }
-
-    /* WineForge-Internal: launcher-compat/rockstar-cef-in-process-gpu-v1. */
-    if (launcher_process_matches( app_name, cmd_line, socialclub_helperW,
-                                  socialclub_pathW, socialclub_path_altW ))
-    {
-        if (launcher_string_contains_ci( cmd_line, process_typeW ) ||
-            launcher_string_contains_ci( cmd_line, in_process_gpuW ))
-            return NULL;
-        return rockstar_argsW;
-    }
-
-    return NULL;
-}
-
 static BOOL append_process_args( WCHAR **cmd_line, const WCHAR *append )
 {
     WCHAR *new_cmdline;
@@ -587,6 +520,9 @@ static BOOL append_process_args( WCHAR **cmd_line, const WCHAR *append )
     return TRUE;
 }
 
+/**********************************************************************
+ *           CreateProcessInternalW   (kernelbase.@)
+ */
 BOOL WINAPI DECLSPEC_HOTPATCH CreateProcessInternalW( HANDLE token, const WCHAR *app_name, WCHAR *cmd_line,
                                                       SECURITY_ATTRIBUTES *process_attr,
                                                       SECURITY_ATTRIBUTES *thread_attr,
@@ -626,7 +562,7 @@ BOOL WINAPI DECLSPEC_HOTPATCH CreateProcessInternalW( HANDLE token, const WCHAR 
         app_name = name;
     }
 
-    if ((append_args = get_launcher_cef_append_args( app_name, tidy_cmdline )))
+    if ((append_args = get_launcher_process_args( app_name, tidy_cmdline )))
     {
         WCHAR *old_cmdline = tidy_cmdline;
 
