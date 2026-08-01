@@ -5641,6 +5641,17 @@ NTSTATUS WINAPI NtProtectVirtualMemory( HANDLE process, PVOID *addr_ptr, SIZE_T 
         if (get_committed_size( view, base, size, &vprot, VPROT_COMMITTED ) >= size && (vprot & VPROT_COMMITTED))
         {
             old = get_win32_prot( vprot, view->protect );
+#if defined(__APPLE__) && defined(__x86_64__)
+            /* WineForge-Internal: launcher-compat/battlenet-cef-cow-protection-v1. */
+            if (battlenet_cef_cow_compat_enabled() && (view->protect & SEC_IMAGE) &&
+                (new_prot & 0xff) == PAGE_READONLY)
+            {
+                if ((old & 0xff) == PAGE_WRITECOPY)
+                    old = (old & ~0xff) | PAGE_READWRITE;
+                else if ((old & 0xff) == PAGE_EXECUTE_WRITECOPY)
+                    old = (old & ~0xff) | PAGE_EXECUTE_READWRITE;
+            }
+#endif
             status = set_protection( view, base, size, new_prot );
         }
         else status = STATUS_NOT_COMMITTED;

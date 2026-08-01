@@ -51,6 +51,32 @@ static const char *const dxmt_module_names[] =
     "winemetal.dll",
 };
 
+BOOL dxmt_runtime_available(void)
+{
+    static const char *const required_files[] =
+    {
+        "i386-windows/dxgi.dll",
+        "i386-windows/d3d11.dll",
+        "x86_64-unix/winemetal.so",
+    };
+    const char *runtime_dir = get_dxmt_runtime_dir();
+    unsigned int i;
+    char *path;
+
+    if (!runtime_dir || !runtime_dir[0]) return FALSE;
+    for (i = 0; i < ARRAY_SIZE(required_files); i++)
+    {
+        if (asprintf( &path, "%s/%s", runtime_dir, required_files[i] ) == -1) return FALSE;
+        if (access( path, R_OK ))
+        {
+            free( path );
+            return FALSE;
+        }
+        free( path );
+    }
+    return TRUE;
+}
+
 BOOL is_dxmt_module_name( const char *path )
 {
     const char *name = strrchr( path, '/' );

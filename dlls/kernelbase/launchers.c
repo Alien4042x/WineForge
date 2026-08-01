@@ -66,6 +66,16 @@ static const struct launcher_process_policy launcher_process_policies[] =
         {L"--type=", L"--in-process-gpu", NULL},
         L" --in-process-gpu",
     },
+    /* WineForge-Internal: launcher-compat/battlenet-in-process-gpu-v1. */
+    {
+        L"Battle.net.exe",
+        L"\\Program Files (x86)\\Battle.net\\",
+        L"/Program Files (x86)/Battle.net/",
+        NULL,
+        NULL,
+        {L"--type=", L"--in-process-gpu", NULL},
+        L" --in-process-gpu",
+    },
 };
 
 static BOOL string_contains_ci( const WCHAR *string, const WCHAR *needle )

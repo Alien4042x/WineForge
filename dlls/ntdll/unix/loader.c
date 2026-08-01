@@ -1036,6 +1036,8 @@ enum process_graphics_backend
 static enum process_graphics_backend process_graphics_backend;
 static BOOL process_uses_cef_software;
 static BOOL process_uses_wfdx_launchers;
+static BOOL process_uses_battlenet_dxmt;
+static BOOL process_uses_battlenet_cef_cow;
 
 static BOOL parse_graphics_backend( const char *name, enum process_graphics_backend *backend )
 {
@@ -1084,12 +1086,17 @@ static const char *const rockstar_launcher_app_paths[] =
     "\\rockstar games\\social club\\socialclubhelper.exe",
 };
 
-static BOOL is_rockstar_launcher_app( const char *image_path )
+static const char *const battlenet_launcher_app_paths[] =
+{
+    "\\program files (x86)\\battle.net\\battle.net.exe",
+};
+
+static BOOL is_launcher_app( const char *image_path, const char *const *paths, unsigned int count )
 {
     unsigned int i;
 
-    for (i = 0; i < ARRAY_SIZE(rockstar_launcher_app_paths); i++)
-        if (ascii_path_ends_with_ci( image_path, rockstar_launcher_app_paths[i] )) return TRUE;
+    for (i = 0; i < count; i++)
+        if (ascii_path_ends_with_ci( image_path, paths[i] )) return TRUE;
     return FALSE;
 }
 
@@ -1167,9 +1174,23 @@ static void init_process_graphics_backend( const WCHAR *image_path )
     process_uses_cef_software = configured_backend == PROCESS_GRAPHICS_BACKEND_DXMT &&
                                 is_software_cef_process();
 
+    /* WineForge-Internal: launcher-compat/battlenet-cef-cow-protection-v1. */
+    process_uses_battlenet_cef_cow =
+        ascii_path_ends_with_ci( image_pathA, "\\program files (x86)\\battle.net\\battle.net.exe" ) &&
+        wargv_has_ascii_argument_ci( "--type=renderer" );
+
+    /* WineForge-Internal: launcher-compat/battlenet-dxmt-policy-v1. */
+    process_uses_battlenet_dxmt =
+        is_launcher_app( image_pathA, battlenet_launcher_app_paths,
+                         ARRAY_SIZE(battlenet_launcher_app_paths) ) &&
+        dxmt_runtime_available();
+    if (process_uses_battlenet_dxmt)
+        process_graphics_backend = PROCESS_GRAPHICS_BACKEND_DXMT;
+
     /* WineForge-Internal: wfdxcompat/rockstar-launcher-policy-v1. */
     process_uses_wfdx_launchers = FALSE;
-    if (is_rockstar_launcher_app( image_pathA ))
+    if (is_launcher_app( image_pathA, rockstar_launcher_app_paths,
+                         ARRAY_SIZE(rockstar_launcher_app_paths) ))
     {
         process_graphics_backend = PROCESS_GRAPHICS_BACKEND_D3DMETAL;
         if (wfdxcompat_launcher_runtime_available())
@@ -1178,10 +1199,11 @@ static void init_process_graphics_backend( const WCHAR *image_path )
             process_graphics_backend = configured_backend;
     }
 
-    TRACE( "graphics backend for %s: global %s, selected %s, policy %s%s\n", image_nameA,
+    TRACE( "graphics backend for %s: global %s, selected %s, policy %s%s%s\n", image_nameA,
            backend && backend[0] ? backend : "wine",
            process_graphics_backend_name( process_graphics_backend ),
            process_uses_cef_software ? "cef-software" : "default",
+           process_uses_battlenet_dxmt ? ",battlenet-dxmt" : "",
            process_uses_wfdx_launchers ? ",wfdx-launchers" : "" );
 }
 
@@ -1210,6 +1232,11 @@ BOOL dxmt_graphics_backend_enabled(void)
 BOOL wfdxcompat_launcher_runtime_enabled(void)
 {
     return process_uses_wfdx_launchers;
+}
+
+BOOL battlenet_cef_cow_compat_enabled(void)
+{
+    return process_uses_battlenet_cef_cow;
 }
 
 static BOOL cef_software_policy_enabled(void)
@@ -1629,7 +1656,8 @@ static NTSTATUS find_builtin_dll( UNICODE_STRING *nt_name, ANSI_STRING *exp_name
     }
 
 #if defined(__APPLE__) && defined(__x86_64__)
-    if (d3dmetal_graphics_backend_enabled() && is_d3dmetal_module_name( file + pos + 1 ))
+    if (search_machine == IMAGE_FILE_MACHINE_AMD64 &&
+        d3dmetal_graphics_backend_enabled() && is_d3dmetal_module_name( file + pos + 1 ))
     {
         char *d3dmetal_pe = resolve_d3dmetal_pe_path( file + pos + 1 );
 
