@@ -1,7 +1,7 @@
 /*
  * WineForge launcher compatibility policy
  *
- * Copyright 2026 Alien4042x
+ * Copyright (C) 2026 Radim Vesely for WineForge
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -71,6 +71,16 @@ static const struct launcher_process_policy launcher_process_policies[] =
         L"Battle.net.exe",
         L"\\Program Files (x86)\\Battle.net\\",
         L"/Program Files (x86)/Battle.net/",
+        NULL,
+        NULL,
+        {L"--type=", L"--in-process-gpu", NULL},
+        L" --in-process-gpu",
+    },
+    /* WineForge-Internal: launcher-compat/ubisoft-connect-in-process-gpu-v1. */
+    {
+        L"upc.exe",
+        L"\\Program Files (x86)\\Ubisoft\\Ubisoft Game Launcher\\",
+        L"/Program Files (x86)/Ubisoft/Ubisoft Game Launcher/",
         NULL,
         NULL,
         {L"--type=", L"--in-process-gpu", NULL},

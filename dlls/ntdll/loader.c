@@ -213,7 +213,7 @@ static inline BOOL contains_path( LPCWSTR name )
     return ((*name && (name[1] == ':')) || wcschr(name, '/') || wcschr(name, '\\'));
 }
 
-static BOOL wfdx_launcher_path_has_suffix( const UNICODE_STRING *path, const WCHAR *suffix )
+static BOOL process_image_path_has_suffix( const UNICODE_STRING *path, const WCHAR *suffix )
 {
     unsigned int path_len = path->Length / sizeof(WCHAR);
     unsigned int suffix_len = wcslen( suffix );
@@ -249,13 +249,64 @@ static BOOL wfdx_launcher_env_present( const WCHAR *name_str )
 static BOOL wfdx_launcher_process_enabled(void)
 {
     const UNICODE_STRING *path = &NtCurrentTeb()->Peb->ProcessParameters->ImagePathName;
-    BOOL rockstar = wfdx_launcher_path_has_suffix( path,
+    BOOL rockstar = process_image_path_has_suffix( path,
             L"\\Rockstar Games\\Launcher\\Launcher.exe" ) ||
-            wfdx_launcher_path_has_suffix( path,
+            process_image_path_has_suffix( path,
             L"\\Rockstar Games\\Social Club\\SocialClubHelper.exe" );
 
     return rockstar && wfdx_launcher_env_present( L"WFDXCOMPAT_RUNTIME_DIR" );
 }
+
+#ifdef __i386__
+static void apply_ubisoft_cef135_command_line_gate( WINE_MODREF *wm )
+{
+    static const BYTE before[] =
+    {
+        0x8b, 0x47, 0x34, 0x89, 0x46, 0x34,
+        0x8b, 0x47, 0x38, 0x89, 0x46, 0x38,
+    };
+    static const BYTE after[] =
+    {
+        0x8b, 0x47, 0x34, 0x89, 0x46, 0x34,
+        0x31, 0xc0, 0x90, 0x89, 0x46, 0x38,
+    };
+    static const SIZE_T offset = 0x11e92d;
+    const UNICODE_STRING *image_path = &NtCurrentTeb()->Peb->ProcessParameters->ImagePathName;
+    void *target, *protect_addr;
+    SIZE_T protect_size;
+    ULONG old_prot;
+
+    C_ASSERT( sizeof(before) == sizeof(after) );
+
+    if (wcsicmp( wm->ldr.BaseDllName.Buffer, L"libcef.dll" )) return;
+    if (!process_image_path_has_suffix( image_path,
+            L"\\Program Files (x86)\\Ubisoft\\Ubisoft Game Launcher\\upc.exe" )) return;
+    if (offset > wm->ldr.SizeOfImage || sizeof(before) > wm->ldr.SizeOfImage - offset) return;
+
+    target = (BYTE *)wm->ldr.DllBase + offset;
+    if (!memcmp( target, after, sizeof(after) )) return;
+    if (memcmp( target, before, sizeof(before) ))
+    {
+        WARN( "Ubisoft CEF 135 command-line signature does not match\n" );
+        return;
+    }
+
+    /* WineForge-Internal: launcher-compat/ubisoft-cef135-command-line-gate-v1.
+     * Exact process, module, architecture and original-byte gate; version
+     * mismatches remain untouched. */
+    protect_addr = target;
+    protect_size = sizeof(before);
+    if (NtProtectVirtualMemory( NtCurrentProcess(), &protect_addr, &protect_size,
+                                PAGE_EXECUTE_READWRITE, &old_prot ))
+    {
+        WARN( "failed to make Ubisoft CEF 135 command-line gate writable\n" );
+        return;
+    }
+    memcpy( target, after, sizeof(after) );
+    NtProtectVirtualMemory( NtCurrentProcess(), &protect_addr, &protect_size, old_prot, &old_prot );
+    TRACE( "enabled Ubisoft CEF 135 command-line arguments\n" );
+}
+#endif
 
 static BOOL wfdx_launcher_export_name( const ANSI_STRING *name, const char *expected )
 {
@@ -2531,6 +2582,10 @@ static NTSTATUS build_module( LPCWSTR load_path, const UNICODE_STRING *nt_name, 
 
     TRACE_(loaddll)( "Loaded %s at %p: %s\n", debugstr_w(wm->ldr.FullDllName.Buffer), *module,
                      is_builtin ? "builtin" : "native" );
+
+#ifdef __i386__
+    if (!is_builtin) apply_ubisoft_cef135_command_line_gate( wm );
+#endif
 
 #if defined(__x86_64__)
     /* CW HACK 22434 */
