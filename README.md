@@ -1,6 +1,6 @@
 # WineForge
 
-![WineForge](https://img.shields.io/badge/WineForge-0.6.0.1-blue)
+![WineForge](https://img.shields.io/badge/WineForge-0.6.0.2-blue)
 ![Wine](https://img.shields.io/badge/Wine-11.14-8a2be2)
 ![Platform](https://img.shields.io/badge/platform-macOS-lightgrey)
 ![License](https://img.shields.io/badge/license-LGPL--2.1--or--later-green)
@@ -15,7 +15,7 @@ This repository is not upstream Wine, not CrossOver, and not a complete runtime 
 Current build identity:
 
 ```text
-wine-11.14 (WineForge 0.6.0.1)
+wine-11.14 (WineForge 0.6.0.2)
 ```
 
 ## Credits
@@ -262,9 +262,9 @@ Unsupported waits and sensitive synchronization semantics remain on the Wine ser
 
 ## Status
 
-This is an experimental WineForge source tree focused on local testing and reproducible macOS gaming builds.
+WineForge 0.6.0.2 is the current stable WineForge release line for tested macOS gaming workflows.
 
-Some games and launchers work, while others still need profiling or targeted compatibility work. Some compatibility patches currently prioritize functionality and testing while the implementation continues to evolve.
+Compatibility remains application-specific. Unsupported games and launchers may still require profiling or targeted compatibility patches, but this does not change the release status of the tested WineForge runtime.
 
 ## License
 
