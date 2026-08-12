@@ -65,6 +65,18 @@ struct lsa_handle
     LSA_SEC_HANDLE handle;
 };
 
+static char *strdupWA( const WCHAR *str )
+{
+    char *ret = NULL;
+    if (str)
+    {
+        int len = WideCharToMultiByte( CP_ACP, 0, str, -1, NULL, 0, NULL, NULL );
+        if ((ret = RtlAllocateHeap( GetProcessHeap(), 0, len )))
+            WideCharToMultiByte( CP_ACP, 0, str, -1, ret, len, NULL, NULL );
+    }
+    return ret;
+}
+
 static const char *debugstr_as(const LSA_STRING *str)
 {
     if (!str) return "<null>";
@@ -348,6 +360,51 @@ static SECURITY_STATUS lsa_lookup_package(SEC_WCHAR *nameW, struct lsa_package *
     }
 
     return SEC_E_SECPKG_NOT_FOUND;
+}
+
+static SECURITY_STATUS WINAPI lsa_QueryCredentialsAttributesW(
+        CredHandle *credential, ULONG attr, void *buf)
+{
+    struct lsa_handle *lsa_cred;
+
+    TRACE("%p %lu %p\n", credential, attr, buf);
+    if (!credential) return SEC_E_INVALID_HANDLE;
+
+    lsa_cred = (struct lsa_handle *)credential->dwLower;
+    if (!lsa_cred || lsa_cred->magic != LSA_MAGIC_CREDENTIALS) return SEC_E_INVALID_HANDLE;
+
+    if (!lsa_cred->package->lsa_api || !lsa_cred->package->lsa_api->SpQueryCredentialsAttributes)
+        return SEC_E_UNSUPPORTED_FUNCTION;
+
+    return lsa_cred->package->lsa_api->SpQueryCredentialsAttributes(lsa_cred->handle, attr, buf);
+}
+
+static SECURITY_STATUS WINAPI lsa_QueryCredentialsAttributesA(
+        CredHandle *credential, ULONG attr, void *buf)
+{
+    SECURITY_STATUS status;
+
+    TRACE("%p %lu %p\n", credential, attr, buf);
+
+    switch (attr)
+    {
+    case SECPKG_CRED_ATTR_NAMES:
+    {
+        SecPkgCredentials_NamesA *namesA = buf;
+        SecPkgCredentials_NamesW namesW;
+
+        status = lsa_QueryCredentialsAttributesW(credential, attr, &namesW);
+        if (status) return status;
+
+        namesA->sUserName = strdupWA(namesW.sUserName);
+        FreeContextBuffer(namesW.sUserName);
+        if (!namesA->sUserName) return STATUS_NO_MEMORY;
+        return SEC_E_OK;
+    }
+    default:
+        FIXME("unsupported attribute: %lu\n", attr);
+        return STATUS_NOT_IMPLEMENTED;
+    }
 }
 
 static SECURITY_STATUS WINAPI lsa_AcquireCredentialsHandleW(
@@ -821,7 +878,7 @@ static const SecurityFunctionTableW lsa_sspi_tableW =
 {
     1,
     NULL, /* EnumerateSecurityPackagesW */
-    NULL, /* QueryCredentialsAttributesW */
+    lsa_QueryCredentialsAttributesW,
     lsa_AcquireCredentialsHandleW,
     lsa_FreeCredentialsHandle,
     NULL, /* Reserved2 */
@@ -853,7 +910,7 @@ static const SecurityFunctionTableA lsa_sspi_tableA =
 {
     1,
     NULL, /* EnumerateSecurityPackagesA */
-    NULL, /* QueryCredentialsAttributesA */
+    lsa_QueryCredentialsAttributesA,
     lsa_AcquireCredentialsHandleA,
     lsa_FreeCredentialsHandle,
     NULL, /* Reserved2 */
@@ -879,6 +936,61 @@ static const SecurityFunctionTableA lsa_sspi_tableA =
     lsa_EncryptMessage,
     lsa_DecryptMessage,
     NULL, /* SetContextAttributesA */
+};
+
+static NTSTATUS NTAPI lsa_GetClientInfo( SECPKG_CLIENT_INFO *info )
+{
+    FIXME( "%p\n", info );
+
+    memset( info, 0, sizeof(*info) );
+    info->ProcessID = GetCurrentProcessId();
+    info->ThreadID = GetCurrentThreadId();
+    return SEC_E_OK;
+}
+
+static const LSA_SECPKG_FUNCTION_TABLE lsa_secpkg_table =
+{
+    NULL, /* CreateLogonSession */
+    NULL, /* DeleteLogonSession */
+    NULL, /* AddCredential */
+    NULL, /* GetCredentials */
+    NULL, /* DeleteCredential */
+    NULL, /* AllocateLsaHeap */
+    NULL, /* FreeLsaHeap */
+    NULL, /* AllocateClientBuffer */
+    NULL, /* FreeClientBuffer */
+    NULL, /* CopyToClientBuffer */
+    NULL, /* CopyFromClientBuffer */
+    NULL, /* ImpersonateClient */
+    NULL, /* UnloadPackage */
+    NULL, /* DuplicateHandle */
+    NULL, /* SaveSupplementalCredentials */
+    NULL, /* CreateThread */
+    lsa_GetClientInfo,
+    NULL, /* RegisterNotification */
+    NULL, /* CancelNotification */
+    NULL, /* MapBuffer */
+    NULL, /* CreateToken */
+    NULL, /* AuditLogon */
+    NULL, /* CallPackage */
+    NULL, /* FreeReturnBuffer */
+    NULL, /* GetCallInfo */
+    NULL, /* CallPackageEx */
+    NULL, /* CreateSharedMemory */
+    NULL, /* AllocateSharedMemory */
+    NULL, /* FreeSharedMemory */
+    NULL, /* DeleteSharedMemory */
+    NULL, /* OpenSamUser */
+    NULL, /* GetUserCredentials */
+    NULL, /* GetUserAuthData */
+    NULL, /* CloseSamUser */
+    NULL, /* ConvertAuthDataToToken */
+    NULL, /* ClientCallback */
+    NULL, /* UpdateCredentials */
+    NULL, /* GetAuthDataForUser */
+    NULL, /* CrackSingleName */
+    NULL, /* AuditAccountLogon */
+    NULL, /* CallPackagePassthrough */
 };
 
 static void add_package(struct lsa_package *package)
@@ -917,7 +1029,8 @@ static BOOL initialize_package(struct lsa_package *package,
                   debugstr_an(package->name->Buffer, package->name->Length),
                   package->lsa_api_version, package->lsa_api, package->lsa_table_count);
 
-            status = package->lsa_api->Initialize(package->package_id, NULL /* FIXME: params */, NULL);
+            status = package->lsa_api->Initialize(package->package_id, NULL /* FIXME: params */,
+                    (LSA_SECPKG_FUNCTION_TABLE *)&lsa_secpkg_table);
             if (status == STATUS_SUCCESS)
             {
                 status = pSpUserModeInitialize(SECPKG_INTERFACE_VERSION, &package->user_api_version, &package->user_api, &package->user_table_count);

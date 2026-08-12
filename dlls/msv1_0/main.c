@@ -34,10 +34,20 @@
 #include "lmapibuf.h"
 #include "lmerr.h"
 
+#include "wine/list.h"
 #include "wine/debug.h"
 #include "unixlib.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(ntlm);
+
+static const LSA_SECPKG_FUNCTION_TABLE *lsa_secpkg_table;
+
+enum message_type
+{
+    NTLM_NEGOTIATE      = 1,
+    NTLM_CHALLENGE      = 2,
+    NTLM_AUTHENTICATE   = 3
+};
 
 enum negotiate_flags
 {
@@ -125,6 +135,136 @@ struct ntlm_authenticate
     BYTE mic[16];
 };
 
+struct local_auth
+{
+    struct list entry;
+    BYTE challenge[8];
+    char session_key[16];
+    BOOL got_token;
+    HANDLE token;
+};
+
+static struct list local_auths_list = LIST_INIT(local_auths_list);
+
+static CRITICAL_SECTION local_auth_cs;
+static CRITICAL_SECTION_DEBUG local_auth_debug =
+{
+    0, 0, &local_auth_cs,
+    { &local_auth_debug.ProcessLocksList, &local_auth_debug.ProcessLocksList },
+      0, 0, { (DWORD_PTR)(__FILE__ ": local_auth_cs") }
+};
+static CRITICAL_SECTION local_auth_cs = { &local_auth_debug, -1, 0, 0, 0, 0 };
+
+static const char *debugstr_challenge( const BYTE challenge[8] )
+{
+    return wine_dbg_sprintf( "%02x%02x%02x%02x%02x%02x%02x%02x",
+            challenge[0], challenge[1], challenge[2], challenge[3],
+            challenge[4], challenge[5], challenge[6], challenge[7] );
+}
+
+static NTSTATUS local_auth_init( const BYTE challenge[8], char *session_key )
+{
+    struct local_auth *auth;
+    NTSTATUS status = SEC_E_OK;
+
+    TRACE( "local authentication challenge: %s\n", debugstr_challenge(challenge) );
+
+    EnterCriticalSection( &local_auth_cs );
+    LIST_FOR_EACH_ENTRY( auth, &local_auths_list, struct local_auth, entry )
+    {
+        if (!memcmp( challenge, auth->challenge, sizeof(auth->challenge) ))
+        {
+            TRACE( "server challenge conflict detected\n" );
+            status = STATUS_RETRY;
+            break;
+        }
+    }
+
+    if (!status && !(auth = calloc( 1, sizeof(*auth) )))
+        status = SEC_E_INSUFFICIENT_MEMORY;
+
+    if (!status && !RtlGenRandom( auth->session_key, sizeof(auth->session_key) ))
+    {
+        free( auth );
+        status = SEC_E_INTERNAL_ERROR;
+    }
+
+    if (!status)
+    {
+        memcpy( auth->challenge, challenge, sizeof(auth->challenge) );
+        memcpy( session_key, auth->session_key, sizeof(auth->session_key) );
+        list_add_head( &local_auths_list, &auth->entry );
+    }
+
+    LeaveCriticalSection( &local_auth_cs );
+    return status;
+}
+
+static NTSTATUS local_auth_authenticate( const BYTE challenge[8], HANDLE token, char *session_key )
+{
+    NTSTATUS status = STATUS_NOT_FOUND;
+    struct local_auth *auth;
+
+    EnterCriticalSection( &local_auth_cs );
+    LIST_FOR_EACH_ENTRY( auth, &local_auths_list, struct local_auth, entry )
+    {
+        if (auth->got_token) continue;
+        if (!memcmp( challenge, auth->challenge, sizeof(auth->challenge) ))
+        {
+            if (!DuplicateToken( token, SecurityImpersonation, &auth->token ))
+                status = SEC_E_INVALID_TOKEN;
+            else
+            {
+                memcpy( session_key, auth->session_key, sizeof(auth->session_key) );
+                status = SEC_E_OK;
+            }
+
+            auth->got_token = TRUE;
+            break;
+        }
+    }
+    LeaveCriticalSection( &local_auth_cs );
+    return status;
+}
+
+static NTSTATUS local_auth_finalize( const BYTE challenge[8], HANDLE *token )
+{
+    NTSTATUS status = SEC_E_LOGON_DENIED;
+    struct local_auth *auth;
+
+    EnterCriticalSection( &local_auth_cs );
+    LIST_FOR_EACH_ENTRY( auth, &local_auths_list, struct local_auth, entry )
+    {
+        if (!memcmp( challenge, auth->challenge, sizeof(auth->challenge) ))
+        {
+            if (auth->token)
+            {
+                if (token) *token = auth->token;
+                else CloseHandle( auth->token );
+                status = SEC_E_OK;
+            }
+
+            list_remove( &auth->entry );
+            free( auth );
+            break;
+        }
+    }
+    LeaveCriticalSection( &local_auth_cs );
+    return status;
+}
+
+static void local_auth_cleanup( void )
+{
+    struct local_auth *auth, *tmp;
+
+    LIST_FOR_EACH_ENTRY_SAFE( auth, tmp, &local_auths_list, struct local_auth, entry )
+    {
+        list_remove( &auth->entry );
+        CloseHandle( auth->token );
+        free( auth );
+    }
+}
+
 static void ntlm_cleanup( struct ntlm_ctx *ctx )
 {
     WINE_UNIX_CALL( unix_cleanup, ctx );
@@ -203,6 +343,7 @@ static NTSTATUS NTAPI ntlm_SpInitialize( ULONG_PTR package_id, SECPKG_PARAMETERS
                                          LSA_SECPKG_FUNCTION_TABLE *lsa_function_table )
 {
     TRACE( "%#Ix, %p, %p\n", package_id, params, lsa_function_table );
+    lsa_secpkg_table = lsa_function_table;
     return STATUS_SUCCESS;
 }
 
@@ -211,6 +352,17 @@ static NTSTATUS NTAPI ntlm_SpGetInfo( SecPkgInfoW *info )
     TRACE( "%p\n", info );
     *info = ntlm_package_info;
     return STATUS_SUCCESS;
+}
+
+static WCHAR *strndupW( const WCHAR *str, size_t len )
+{
+    WCHAR *ret = malloc( (len + 1) * sizeof(WCHAR) );
+    if (ret)
+    {
+        memcpy( ret, str, len * sizeof(WCHAR) );
+        ret[len] = 0;
+    }
+    return ret;
 }
 
 static char *get_username_arg( const WCHAR *user, int user_len )
@@ -297,18 +449,13 @@ static NTSTATUS NTAPI ntlm_SpAcquireCredentialsHandle( UNICODE_STRING *principal
            get_key_fn, get_key_arg, cred, expiry );
 
     if (auth_data && (status = map_auth_data( auth_data, &id ))) return status;
+    if (!(cred = calloc( 1, sizeof(*cred) ))) return SEC_E_INSUFFICIENT_MEMORY;
 
     cred_use &= ~SECPKG_CRED_RESERVED;
     switch (cred_use)
     {
     case SECPKG_CRED_INBOUND:
-        if (!(cred = malloc( sizeof(*cred) ))) return SEC_E_INSUFFICIENT_MEMORY;
-        cred->mode         = MODE_SERVER;
-        cred->username_arg = NULL;
-        cred->domain_arg   = NULL;
-        cred->password     = NULL;
-        cred->password_len = 0;
-        cred->no_cached_credentials = 0;
+        cred->mode = MODE_SERVER;
 
         *handle = (LSA_SEC_HANDLE)cred;
         status = SEC_E_OK;
@@ -317,13 +464,7 @@ static NTSTATUS NTAPI ntlm_SpAcquireCredentialsHandle( UNICODE_STRING *principal
     case SECPKG_CRED_BOTH:
         /* fall through */
     case SECPKG_CRED_OUTBOUND:
-        if (!(cred = malloc( sizeof(*cred) ))) return SEC_E_INSUFFICIENT_MEMORY;
-
-        cred->mode         = cred_use == SECPKG_CRED_OUTBOUND ? MODE_CLIENT : MODE_BOTH;
-        cred->username_arg = NULL;
-        cred->domain_arg   = NULL;
-        cred->password     = NULL;
-        cred->password_len = 0;
+        cred->mode = cred_use == SECPKG_CRED_OUTBOUND ? MODE_CLIENT : MODE_BOTH;
         cred->no_cached_credentials = (cred_use & WINE_NO_CACHED_CREDENTIALS);
 
         if (auth_data)
@@ -363,6 +504,8 @@ static NTSTATUS NTAPI ntlm_SpAcquireCredentialsHandle( UNICODE_STRING *principal
             TRACE( "username is %s\n", debugstr_wn(user, user_len) );
             TRACE( "domain name is %s\n", debugstr_wn(domain, domain_len) );
 
+            cred->usernameW = strndupW(user, user_len);
+            cred->domainW = strndupW(domain, domain_len);
             cred->username_arg = get_username_arg( user, user_len );
             cred->domain_arg   = get_domain_arg( domain, domain_len );
             if (password_len)
@@ -373,6 +516,22 @@ static NTSTATUS NTAPI ntlm_SpAcquireCredentialsHandle( UNICODE_STRING *principal
                 WideCharToMultiByte( CP_UNIXCP, WC_NO_BEST_FIT_CHARS, password, password_len, cred->password,
                                      cred->password_len, NULL, NULL );
             }
+        }
+        else
+        {
+            SECPKG_CLIENT_INFO info;
+            HANDLE h;
+
+            lsa_secpkg_table->GetClientInfo( &info );
+            h = OpenThread( THREAD_QUERY_INFORMATION, FALSE, info.ThreadID );
+            if (!h || !OpenThreadToken( h, TOKEN_QUERY | TOKEN_DUPLICATE, TRUE, &cred->token ))
+            {
+                CloseHandle( h );
+                h = OpenProcess( PROCESS_QUERY_INFORMATION, FALSE, info.ProcessID );
+                if (!h || !OpenProcessToken( h, TOKEN_QUERY | TOKEN_DUPLICATE, &cred->token ))
+                    WARN("failed to get user token (%ld)\n", GetLastError());
+            }
+            CloseHandle( h );
         }
 
         *handle = (LSA_SEC_HANDLE)cred;
@@ -395,6 +554,77 @@ done:
     return status;
 }
 
+static NTSTATUS NTAPI ntlm_SpQueryCredentialsAttributes( LSA_SEC_HANDLE handle, ULONG attr, void *buf)
+{
+    WCHAR domain_buf[DNLEN + 1], username_buf[UNLEN + 1], *domain, *username;
+    struct ntlm_cred *cred = (struct ntlm_cred *)handle;
+    SecPkgCredentials_NamesW *names = buf;
+    size_t len;
+
+    TRACE( "%#Ix, %lu, %p\n", handle, attr, buf );
+
+    if (attr != SECPKG_CRED_ATTR_NAMES) return STATUS_INVALID_PARAMETER;
+    if (cred->mode == MODE_SERVER)
+    {
+        FIXME("MODE_SERVER not handled\n");
+        return STATUS_NOT_IMPLEMENTED;
+    }
+    if (!cred->usernameW && !cred->domainW && !cred->token)
+    {
+        FIXME("no username/domain/token\n");
+        return STATUS_NOT_IMPLEMENTED;
+    }
+
+    username = cred->usernameW;
+    domain = cred->domainW;
+
+    if (cred->token)
+    {
+        DWORD username_len = sizeof(username_buf), domain_len = sizeof(domain_buf);
+        char tmp[256];
+        TOKEN_USER *token_user = (TOKEN_USER *)tmp;
+        DWORD size = sizeof(tmp);
+        SID_NAME_USE use;
+        BOOL r;
+
+        if (!GetTokenInformation( cred->token, TokenUser, token_user, size, &size ))
+        {
+            if (GetLastError() != ERROR_INSUFFICIENT_BUFFER)
+                return SEC_E_INTERNAL_ERROR;
+
+            token_user = malloc( size );
+            if (!token_user) return SEC_E_INSUFFICIENT_MEMORY;
+
+            if (!GetTokenInformation( cred->token, TokenUser, token_user, size, &size ))
+            {
+                free( token_user );
+                return SEC_E_INTERNAL_ERROR;
+            }
+        }
+        r = LookupAccountSidW( NULL, token_user->User.Sid, username_buf, &username_len,
+                domain_buf, &domain_len, &use);
+        if (token_user != (TOKEN_USER *)tmp) free( token_user );
+        if (!r) return SEC_E_INTERNAL_ERROR;
+
+        username = username_buf;
+        domain = domain_buf;
+    }
+
+    len = 1;
+    if (domain && domain[0]) len += wcslen( domain ) + 1;
+    if (username) len += wcslen( username );
+    names->sUserName = RtlAllocateHeap( GetProcessHeap(), 0, len * sizeof(WCHAR) );
+    if (!names->sUserName) return SEC_E_INSUFFICIENT_MEMORY;
+    names->sUserName[0] = 0;
+    if (domain && domain[0])
+    {
+        wcscpy( names->sUserName, domain );
+        wcscat( names->sUserName, L"\\" );
+    }
+    if (username) wcscat( names->sUserName, username );
+    return SEC_E_OK;
+}
+
 static NTSTATUS NTAPI ntlm_SpFreeCredentialsHandle( LSA_SEC_HANDLE handle )
 {
     struct ntlm_cred *cred = (struct ntlm_cred *)handle;
@@ -405,9 +635,12 @@ static NTSTATUS NTAPI ntlm_SpFreeCredentialsHandle( LSA_SEC_HANDLE handle )
 
     cred->mode = MODE_INVALID;
     if (cred->password) memset( cred->password, 0, cred->password_len );
+    free( cred->usernameW );
+    free( cred->domainW );
     free( cred->password );
     free( cred->username_arg );
     free( cred->domain_arg );
+    CloseHandle( cred->token );
     free( cred );
     return SEC_E_OK;
 }
@@ -580,14 +813,6 @@ static void create_ntlm1_session_key( const char *secret, unsigned int len, char
     memcpy( session_key, ctx.digest, 16 );
 }
 
-struct md5_ctx
-{
-    unsigned int i[2];
-    unsigned int buf[4];
-    unsigned char in[64];
-    unsigned char digest[16];
-};
-
 void WINAPI MD5Init( struct md5_ctx * );
 void WINAPI MD5Update( struct md5_ctx *, const char *, unsigned int );
 void WINAPI MD5Final( struct md5_ctx * );
@@ -676,6 +901,60 @@ static int get_buffer_index( SecBufferDesc *desc, ULONG type )
         if (desc->pBuffers[idx].BufferType == type) return idx;
     }
     return -1;
+}
+
+static void hmac_md5_init( struct hmac_md5_ctx *ctx, const char *key, unsigned int key_len )
+{
+    char inner_padding[64], tmp_key[16];
+    unsigned int i;
+
+    if (key_len > 64)
+    {
+        struct md5_ctx tmp_ctx;
+
+        MD5Init( &tmp_ctx );
+        MD5Update( &tmp_ctx, key, key_len );
+        MD5Final( &tmp_ctx );
+        memcpy( tmp_key, tmp_ctx.digest, 16 );
+
+        key = tmp_key;
+        key_len = 16;
+    }
+
+    memset( inner_padding, 0, 64 );
+    memset( ctx->outer_padding, 0, 64 );
+    memcpy( inner_padding, key, key_len );
+    memcpy( ctx->outer_padding, key, key_len );
+
+    for (i = 0; i < 64; i++)
+    {
+        inner_padding[i] ^= 0x36;
+        ctx->outer_padding[i] ^= 0x5c;
+    }
+
+    MD5Init( &ctx->ctx );
+    MD5Update( &ctx->ctx, inner_padding, 64 );
+}
+
+static void hmac_md5_update( struct hmac_md5_ctx *ctx, const char *buf, unsigned int len )
+{
+    MD5Update( &ctx->ctx, buf, len );
+}
+
+static void hmac_md5_final( struct hmac_md5_ctx *ctx, char *digest )
+{
+    struct md5_ctx outer_ctx;
+    char inner_digest[16];
+
+    MD5Final( &ctx->ctx );
+    memcpy( inner_digest, ctx->ctx.digest, 16 );
+
+    MD5Init( &outer_ctx );
+    MD5Update( &outer_ctx, ctx->outer_padding, 64 );
+    MD5Update( &outer_ctx, inner_digest, 16 );
+    MD5Final( &outer_ctx );
+
+    memcpy( digest, outer_ctx.digest, 16 );
 }
 
 static NTSTATUS NTAPI ntlm_SpInitLsaModeContext( LSA_SEC_HANDLE cred_handle, LSA_SEC_HANDLE ctx_handle,
@@ -781,6 +1060,12 @@ static NTSTATUS NTAPI ntlm_SpInitLsaModeContext( LSA_SEC_HANDLE cred_handle, LSA
 
         if (!(ctx = calloc( 1, sizeof(*ctx) ))) goto done;
 
+        if (cred->token)
+        {
+            DuplicateTokenEx(cred->token, TOKEN_DUPLICATE | TOKEN_QUERY, NULL,
+                    SecurityImpersonation, TokenImpersonation, &ctx->token);
+        }
+
         if ((status = ntlm_fork( ctx, argv )) != SEC_E_OK) goto done;
         status = SEC_E_INSUFFICIENT_MEMORY;
 
@@ -840,7 +1125,7 @@ static NTSTATUS NTAPI ntlm_SpInitLsaModeContext( LSA_SEC_HANDLE cred_handle, LSA
             encode_base64( password ? password : cred->password, password ? password_len : cred->password_len, buf + 3 );
         }
 
-        TRACE( "sending to ntlm_auth: %s\n", debugstr_a(buf) );
+        TRACE( "sending to ntlm_auth: %s\n", strncmp(buf, "PW ", 3) ? debugstr_a(buf) : "PW <password>" );
         if ((status = ntlm_chat( ctx, buf, NTLM_MAX_BUF, &len )) != SEC_E_OK) goto done;
         TRACE( "ntlm_auth returned %s\n", debugstr_a(buf) );
 
@@ -861,6 +1146,13 @@ static NTSTATUS NTAPI ntlm_SpInitLsaModeContext( LSA_SEC_HANDLE cred_handle, LSA
             goto done;
         }
         bin_len = decode_base64( buf + 3, len - 3, bin );
+
+        ctx->negotiate = malloc( bin_len );
+        if (ctx->negotiate)
+        {
+            ctx->negotiate_len = bin_len;
+            memcpy( ctx->negotiate, bin, bin_len );
+        }
 
         *new_ctx_handle = (LSA_SEC_HANDLE)ctx;
         status = SEC_I_CONTINUE_NEEDED;
@@ -899,22 +1191,66 @@ static NTSTATUS NTAPI ntlm_SpInitLsaModeContext( LSA_SEC_HANDLE cred_handle, LSA
         if (ctx->req_attrs & ISC_REQ_CONFIDENTIALITY && challenge->negotiate_flags & NTLMSSP_NEGOTIATE_SEAL)
             *ctx_attr |= ISC_RET_CONFIDENTIALITY;
 
-        bin_len = input->pBuffers[idx].cbBuffer;
-        memcpy( bin, input->pBuffers[idx].pvBuffer, bin_len );
-
-        strcpy( buf, "TT " );
-        encode_base64( bin, bin_len, buf + 3 );
-        TRACE( "server sent: %s\n", debugstr_a(buf) );
-
-        if ((status = ntlm_chat( ctx, buf, NTLM_MAX_BUF, &len ))) goto done;
-        TRACE( "ntlm_auth returned: %s\n", debugstr_a(buf) );
-
-        if (strncmp( buf, "KK ", 3 ) && strncmp( buf, "AF ", 3 ))
+        if (ctx->token && !local_auth_authenticate( challenge->challenge, ctx->token, ctx->session_key ))
         {
-            status = SEC_E_INVALID_TOKEN;
-            goto done;
+            struct ntlm_authenticate *authenticate = (struct ntlm_authenticate *)bin;
+
+            TRACE( "using local authentication\n" );
+
+            memset( authenticate, 0, sizeof(*authenticate) );
+            memcpy( authenticate->signature, "NTLMSSP", sizeof(authenticate->signature) );
+            authenticate->message_type = NTLM_AUTHENTICATE;
+            authenticate->lm_response_off = sizeof(*authenticate);
+            authenticate->nt_response_off = sizeof(*authenticate);
+            authenticate->domain_off = sizeof(*authenticate);
+            authenticate->username_off = sizeof(*authenticate);
+            authenticate->workstation_off = sizeof(*authenticate);
+            authenticate->random_session_key_off = sizeof(*authenticate);
+            authenticate->negotiate_flags = challenge->negotiate_flags;
+
+            hmac_md5_init( &ctx->mic, ctx->session_key, sizeof(ctx->session_key) );
+            hmac_md5_update( &ctx->mic, ctx->negotiate, ctx->negotiate_len );
+            hmac_md5_update( &ctx->mic, (char *)challenge, input->pBuffers[idx].cbBuffer );
+            hmac_md5_update( &ctx->mic, (char *)authenticate, sizeof(*authenticate) );
+            hmac_md5_final( &ctx->mic, (char *)authenticate->mic );
+
+            ctx->flags = challenge->negotiate_flags;
+            bin_len = sizeof(*authenticate);
         }
-        bin_len = decode_base64( buf + 3, len - 3, bin );
+        else
+        {
+            bin_len = input->pBuffers[idx].cbBuffer;
+            memcpy( bin, input->pBuffers[idx].pvBuffer, bin_len );
+
+            strcpy( buf, "TT " );
+            encode_base64( bin, bin_len, buf + 3 );
+            TRACE( "server sent: %s\n", debugstr_a(buf) );
+
+            if ((status = ntlm_chat( ctx, buf, NTLM_MAX_BUF, &len ))) goto done;
+            TRACE( "ntlm_auth returned: %s\n", debugstr_a(buf) );
+
+            if (strncmp( buf, "KK ", 3 ) && strncmp( buf, "AF ", 3 ))
+            {
+                status = SEC_E_INVALID_TOKEN;
+                goto done;
+            }
+            bin_len = decode_base64( buf + 3, len - 3, bin );
+
+            strcpy( buf, "GF" );
+            if ((status = ntlm_chat( ctx, buf, NTLM_MAX_BUF, &len )) != SEC_E_OK) goto done;
+            if (len < 3) ctx->flags = 0;
+            else sscanf( buf + 3, "%x", &ctx->flags );
+
+            strcpy( buf, "GK" );
+            if ((status = ntlm_chat( ctx, buf, NTLM_MAX_BUF, &len )) != SEC_E_OK) goto done;
+
+            if (!strncmp( buf, "BH", 2 )) TRACE( "no key negotiated\n" );
+            else if (!strncmp( buf, "GK ", 3 ))
+            {
+                TRACE( "session key is %s\n", debugstr_a(buf + 3) );
+                decode_base64( buf + 3, len - 3, ctx->session_key );
+            }
+        }
 
         *new_ctx_handle = (LSA_SEC_HANDLE)ctx;
         status = SEC_E_OK;
@@ -953,36 +1289,19 @@ static NTSTATUS NTAPI ntlm_SpInitLsaModeContext( LSA_SEC_HANDLE cred_handle, LSA
 
     output->pBuffers[idx].cbBuffer = bin_len;
     memcpy( output->pBuffers[idx].pvBuffer, bin, bin_len );
-    if (status == SEC_E_OK)
-    {
-        strcpy( buf, "GF" );
-        if ((status = ntlm_chat( ctx, buf, NTLM_MAX_BUF, &len )) != SEC_E_OK) goto done;
-        if (len < 3) ctx->flags = 0;
-        else sscanf( buf + 3, "%x", &ctx->flags );
 
-        strcpy( buf, "GK" );
-        if ((status = ntlm_chat( ctx, buf, NTLM_MAX_BUF, &len )) != SEC_E_OK) goto done;
-
-        if (!strncmp( buf, "BH", 2 )) TRACE( "no key negotiated\n" );
-        else if (!strncmp( buf, "GK ", 3 ))
-        {
-            bin_len = decode_base64( buf + 3, len - 3, bin );
-            TRACE( "session key is %s\n", debugstr_a(buf + 3) );
-            memcpy( ctx->session_key, bin, bin_len );
-        }
-
-        arc4_init( &ctx->crypt.ntlm.arc4info, ctx->session_key, 16 );
-        ctx->crypt.ntlm.seq_no = 0;
-        create_ntlm2_subkeys( ctx );
-        arc4_init( &ctx->crypt.ntlm2.send_arc4info, ctx->crypt.ntlm2.send_seal_key, 16 );
-        arc4_init( &ctx->crypt.ntlm2.recv_arc4info, ctx->crypt.ntlm2.recv_seal_key, 16 );
-        ctx->crypt.ntlm2.send_seq_no = 0;
-        ctx->crypt.ntlm2.recv_seq_no = 0;
-    }
+    arc4_init( &ctx->crypt.ntlm.arc4info, ctx->session_key, 16 );
+    ctx->crypt.ntlm.seq_no = 0;
+    create_ntlm2_subkeys( ctx );
+    arc4_init( &ctx->crypt.ntlm2.send_arc4info, ctx->crypt.ntlm2.send_seal_key, 16 );
+    arc4_init( &ctx->crypt.ntlm2.recv_arc4info, ctx->crypt.ntlm2.recv_seal_key, 16 );
+    ctx->crypt.ntlm2.send_seq_no = 0;
+    ctx->crypt.ntlm2.recv_seq_no = 0;
 
 done:
     if (status != SEC_E_OK && status != SEC_I_CONTINUE_NEEDED && !ctx_handle && !input)
     {
+        CloseHandle( ctx->token );
         ntlm_cleanup( ctx );
         free( ctx );
     }
@@ -1090,18 +1409,37 @@ static NTSTATUS NTAPI ntlm_SpAcceptLsaModeContext( LSA_SEC_HANDLE cred_handle, L
             if (!strncmp( buf, "BH", 2 )) ERR( "ntlm_auth doesn't understand new command set\n" );
         }
 
-        memcpy( bin, input->pBuffers[0].pvBuffer, bin_len );
-        strcpy( buf, "YR " );
-        encode_base64( bin, bin_len, buf + 3 );
-
-        if ((status = ntlm_chat( ctx, buf, NTLM_MAX_BUF, &len )) != SEC_E_OK) goto done;
-        TRACE( "ntlm_auth returned %s\n", buf );
-        if (strncmp( buf, "TT ", 3))
+        do
         {
-            status = SEC_E_INTERNAL_ERROR;
-            goto done;
-        }
-        bin_len = decode_base64( buf + 3, len - 3, bin );
+            memcpy( bin, input->pBuffers[0].pvBuffer, bin_len );
+            strcpy( buf, "YR " );
+            encode_base64( bin, bin_len, buf + 3 );
+
+            if ((status = ntlm_chat( ctx, buf, NTLM_MAX_BUF, &len )) != SEC_E_OK) goto done;
+            TRACE( "ntlm_auth returned %s\n", buf );
+            if (strncmp( buf, "TT ", 3))
+            {
+                status = SEC_E_INTERNAL_ERROR;
+                goto done;
+            }
+            bin_len = decode_base64( buf + 3, len - 3, bin );
+
+            if (bin_len >= sizeof(struct ntlm_challenge))
+            {
+                struct ntlm_challenge *challenge = (struct ntlm_challenge *)bin;
+
+                ctx->flags = challenge->negotiate_flags;
+                status = local_auth_init( challenge->challenge, ctx->session_key );
+                if (status == STATUS_RETRY) continue;
+                if (!status)
+                {
+                    memcpy( ctx->server_challenge, challenge->challenge, sizeof(ctx->server_challenge) );
+                    hmac_md5_init( &ctx->mic, ctx->session_key, sizeof(ctx->session_key) );
+                    hmac_md5_update( &ctx->mic, (const char *)negotiate, input->pBuffers[0].cbBuffer );
+                    hmac_md5_update( &ctx->mic, bin, bin_len );
+                }
+            }
+        } while(0);
 
         if (!output || output->cBuffers < 1)
         {
@@ -1147,6 +1485,43 @@ static NTSTATUS NTAPI ntlm_SpAcceptLsaModeContext( LSA_SEC_HANDLE cred_handle, L
             *ctx_attr |= ASC_RET_CONFIDENTIALITY;
         if (authenticate->negotiate_flags & NTLMSSP_NEGOTIATE_SIGN)
             *ctx_attr |= ASC_RET_INTEGRITY | ASC_RET_REPLAY_DETECT | ASC_RET_SEQUENCE_DETECT;
+
+
+        if (bin_len >= sizeof(*authenticate) && ctx->flags == authenticate->negotiate_flags &&
+                !authenticate->lm_response_len && !authenticate->nt_response_len &&
+                !authenticate->username_len && !authenticate->domain_len)
+        {
+            BYTE mic_client[16], mic_server[16];
+            HANDLE token;
+
+            TRACE( "using local authentication\n" );
+
+            status = local_auth_finalize( ctx->server_challenge, &token );
+            memset( ctx->server_challenge, 0, sizeof(ctx->server_challenge) );
+            if (status)
+            {
+                memset( ctx->session_key, 0, sizeof(ctx->session_key) );
+                goto done;
+            }
+            /* FIXME: Use the token in QuerySecurityContextToken */
+            CloseHandle( token );
+
+            memcpy( mic_client, authenticate->mic, sizeof(authenticate->mic) );
+            memset( authenticate->mic, 0, sizeof(authenticate->mic) );
+            hmac_md5_update( &ctx->mic, (const char *)authenticate, bin_len );
+            hmac_md5_final( &ctx->mic, (char *)mic_server );
+            if (memcmp(mic_client, mic_server, sizeof(mic_client)))
+                status = SEC_E_MESSAGE_ALTERED;
+            else
+                status = SEC_E_OK;
+            goto done;
+        }
+        else
+        {
+            local_auth_finalize( ctx->server_challenge, NULL );
+            memset( ctx->server_challenge, 0, sizeof(ctx->server_challenge) );
+            memset( ctx->session_key, 0, sizeof(ctx->session_key) );
+        }
 
         strcpy( buf, "KK " );
         encode_base64( bin, bin_len, buf + 3 );
@@ -1215,6 +1590,11 @@ static NTSTATUS NTAPI ntlm_SpAcceptLsaModeContext( LSA_SEC_HANDLE cred_handle, L
                 memcpy( ctx->session_key, bin, 16 );
             }
         }
+    }
+
+done:
+    if (status == SEC_E_OK)
+    {
         arc4_init( &ctx->crypt.ntlm.arc4info, ctx->session_key, 16 );
         ctx->crypt.ntlm.seq_no = 0;
         create_ntlm2_subkeys( ctx );
@@ -1224,10 +1604,8 @@ static NTSTATUS NTAPI ntlm_SpAcceptLsaModeContext( LSA_SEC_HANDLE cred_handle, L
         ctx->crypt.ntlm2.recv_seq_no = 0;
 
         *new_ctx_handle = (LSA_SEC_HANDLE)ctx;
-        status = SEC_E_OK;
     }
 
-done:
     if (status != SEC_E_OK && status != SEC_I_CONTINUE_NEEDED && !ctx_handle)
     {
         ntlm_cleanup( ctx );
@@ -1248,6 +1626,9 @@ static NTSTATUS NTAPI ntlm_SpDeleteContext( LSA_SEC_HANDLE handle )
     TRACE( "%#Ix\n", handle );
 
     if (!ctx) return SEC_E_INVALID_HANDLE;
+    free( ctx->negotiate );
+    CloseHandle( ctx->token );
+    local_auth_finalize( ctx->server_challenge, NULL );
     ntlm_cleanup( ctx );
     free( ctx );
     return SEC_E_OK;
@@ -1296,8 +1677,8 @@ static NTSTATUS NTAPI ntlm_SpQueryContextAttributes( LSA_SEC_HANDLE handle, ULON
         struct ntlm_ctx *ctx = (struct ntlm_ctx *)handle;
 
         flags->Flags = 0;
-        if (ctx->flags & FLAG_NEGOTIATE_SIGN) flags->Flags |= ISC_RET_INTEGRITY;
-        if (ctx->flags & FLAG_NEGOTIATE_SEAL) flags->Flags |= ISC_RET_CONFIDENTIALITY;
+        if (ctx->flags & NTLMSSP_NEGOTIATE_SIGN) flags->Flags |= ISC_RET_INTEGRITY;
+        if (ctx->flags & NTLMSSP_NEGOTIATE_SEAL) flags->Flags |= ISC_RET_CONFIDENTIALITY;
         return SEC_E_OK;
     }
     case SECPKG_ATTR_SIZES:
@@ -1336,7 +1717,7 @@ static NTSTATUS NTAPI ntlm_SpQueryContextAttributes( LSA_SEC_HANDLE handle, ULON
         SEC_WCHAR *signature_alg;
         ULONG signature_size, signature_algid;
 
-        if (ctx->flags & FLAG_NEGOTIATE_KEY_EXCHANGE)
+        if (ctx->flags & NTLMSSP_NEGOTIATE_KEY_EXCH)
         {
             signature_alg = (SEC_WCHAR *)L"HMAC-MD5";
             signature_size = sizeof(L"HMAC-MD5");
@@ -1389,7 +1770,7 @@ static SECPKG_FUNCTION_TABLE ntlm_table =
     ntlm_SpGetInfo,
     NULL, /* AcceptCredentials */
     ntlm_SpAcquireCredentialsHandle,
-    NULL, /* SpQueryCredentialsAttributes */
+    ntlm_SpQueryCredentialsAttributes,
     ntlm_SpFreeCredentialsHandle,
     NULL, /* SaveCredentials */
     NULL, /* GetCredentials */
@@ -1431,73 +1812,13 @@ static NTSTATUS NTAPI ntlm_SpInstanceInit( ULONG version, SECPKG_DLL_FUNCTIONS *
     return STATUS_SUCCESS;
 }
 
-struct hmac_md5_ctx
-{
-    struct md5_ctx ctx;
-    char outer_padding[64];
-};
-
-static void hmac_md5_init( struct hmac_md5_ctx *ctx, const char *key, unsigned int key_len )
-{
-    char inner_padding[64], tmp_key[16];
-    unsigned int i;
-
-    if (key_len > 64)
-    {
-        struct md5_ctx tmp_ctx;
-
-        MD5Init( &tmp_ctx );
-        MD5Update( &tmp_ctx, key, key_len );
-        MD5Final( &tmp_ctx );
-        memcpy( tmp_key, tmp_ctx.digest, 16 );
-
-        key = tmp_key;
-        key_len = 16;
-    }
-
-    memset( inner_padding, 0, 64 );
-    memset( ctx->outer_padding, 0, 64 );
-    memcpy( inner_padding, key, key_len );
-    memcpy( ctx->outer_padding, key, key_len );
-
-    for (i = 0; i < 64; i++)
-    {
-        inner_padding[i] ^= 0x36;
-        ctx->outer_padding[i] ^= 0x5c;
-    }
-
-    MD5Init( &ctx->ctx );
-    MD5Update( &ctx->ctx, inner_padding, 64 );
-}
-
-static void hmac_md5_update( struct hmac_md5_ctx *ctx, const char *buf, unsigned int len )
-{
-    MD5Update( &ctx->ctx, buf, len );
-}
-
-static void hmac_md5_final( struct hmac_md5_ctx *ctx, char *digest )
-{
-    struct md5_ctx outer_ctx;
-    char inner_digest[16];
-
-    MD5Final( &ctx->ctx );
-    memcpy( inner_digest, ctx->ctx.digest, 16 );
-
-    MD5Init( &outer_ctx );
-    MD5Update( &outer_ctx, ctx->outer_padding, 64 );
-    MD5Update( &outer_ctx, inner_digest, 16 );
-    MD5Final( &outer_ctx );
-
-    memcpy( digest, outer_ctx.digest, 16 );
-}
-
 static SECURITY_STATUS create_signature( struct ntlm_ctx *ctx, unsigned int flags, SecBufferDesc *msg,
                                          SecBuffer *sig_buf, enum sign_direction dir, BOOL encrypt )
 {
     unsigned int i, sign_version = 1;
     char *sig = sig_buf->pvBuffer;
 
-    if (flags & FLAG_NEGOTIATE_NTLM2 && flags & FLAG_NEGOTIATE_SIGN)
+    if (flags & NTLMSSP_NEGOTIATE_EXTENDED_SESSIONSECURITY && flags & NTLMSSP_NEGOTIATE_SIGN)
     {
         char digest[16], seq_no[4];
         struct hmac_md5_ctx hmac_md5;
@@ -1531,7 +1852,7 @@ static SECURITY_STATUS create_signature( struct ntlm_ctx *ctx, unsigned int flag
         }
         hmac_md5_final( &hmac_md5, digest );
 
-        if (encrypt && flags & FLAG_NEGOTIATE_KEY_EXCHANGE)
+        if (encrypt && flags & NTLMSSP_NEGOTIATE_KEY_EXCH)
         {
             if (dir == SIGN_SEND)
                 arc4_process( &ctx->crypt.ntlm2.send_arc4info, digest, 8 );
@@ -1550,7 +1871,7 @@ static SECURITY_STATUS create_signature( struct ntlm_ctx *ctx, unsigned int flag
         return SEC_E_OK;
     }
 
-    if (flags & FLAG_NEGOTIATE_SIGN)
+    if (flags & NTLMSSP_NEGOTIATE_SIGN)
     {
         unsigned int crc = 0;
 
@@ -1579,7 +1900,7 @@ static SECURITY_STATUS create_signature( struct ntlm_ctx *ctx, unsigned int flag
         return SEC_E_OK;
     }
 
-    if (flags & FLAG_NEGOTIATE_ALWAYS_SIGN || !flags)
+    if (flags & NTLMSSP_NEGOTIATE_ALWAYS_SIGN || !flags)
     {
         /* create dummy signature */
         memset( sig_buf->pvBuffer, 0, 16 );
@@ -1683,25 +2004,25 @@ static NTSTATUS NTAPI ntlm_SpSealMessage( LSA_SEC_HANDLE handle, ULONG qop, SecB
     if (msg->pBuffers[token_idx].cbBuffer < 16) return SEC_E_BUFFER_TOO_SMALL;
 
     ctx = (struct ntlm_ctx *)handle;
-    if (ctx->flags & FLAG_NEGOTIATE_NTLM2 && ctx->flags & FLAG_NEGOTIATE_SEAL)
+    if (ctx->flags & NTLMSSP_NEGOTIATE_EXTENDED_SESSIONSECURITY && ctx->flags & NTLMSSP_NEGOTIATE_SEAL)
     {
         create_signature( ctx, ctx->flags, msg, &msg->pBuffers[token_idx], SIGN_SEND, FALSE );
 
         arc4_process( &ctx->crypt.ntlm2.send_arc4info, msg->pBuffers[data_idx].pvBuffer,
                       msg->pBuffers[data_idx].cbBuffer );
-        if (ctx->flags & FLAG_NEGOTIATE_KEY_EXCHANGE)
+        if (ctx->flags & NTLMSSP_NEGOTIATE_KEY_EXCH)
             arc4_process( &ctx->crypt.ntlm2.send_arc4info, (char *)msg->pBuffers[token_idx].pvBuffer + 4, 8 );
     }
     else
     {
         char *sig = msg->pBuffers[token_idx].pvBuffer;
 
-        create_signature( ctx, ctx->flags | FLAG_NEGOTIATE_SIGN, msg, &msg->pBuffers[token_idx], SIGN_SEND, FALSE );
+        create_signature( ctx, ctx->flags | NTLMSSP_NEGOTIATE_SIGN, msg, &msg->pBuffers[token_idx], SIGN_SEND, FALSE );
 
         arc4_process( &ctx->crypt.ntlm.arc4info, msg->pBuffers[data_idx].pvBuffer, msg->pBuffers[data_idx].cbBuffer );
         arc4_process( &ctx->crypt.ntlm.arc4info, sig + 4, 12 );
 
-        if (ctx->flags & FLAG_NEGOTIATE_ALWAYS_SIGN || !ctx->flags) memset( sig + 4, 0, 4 );
+        if (ctx->flags & NTLMSSP_NEGOTIATE_ALWAYS_SIGN || !ctx->flags) memset( sig + 4, 0, 4 );
     }
 
     return SEC_E_OK;
@@ -1745,7 +2066,7 @@ static NTSTATUS NTAPI ntlm_SpUnsealMessage( LSA_SEC_HANDLE handle, SecBufferDesc
     }
 
     ctx = (struct ntlm_ctx *)handle;
-    if (ctx->flags & FLAG_NEGOTIATE_NTLM2 && ctx->flags & FLAG_NEGOTIATE_SEAL)
+    if (ctx->flags & NTLMSSP_NEGOTIATE_EXTENDED_SESSIONSECURITY && ctx->flags & NTLMSSP_NEGOTIATE_SEAL)
     {
         for (i = 0; i < msg->cBuffers; i++)
         {
@@ -1766,7 +2087,7 @@ static NTSTATUS NTAPI ntlm_SpUnsealMessage( LSA_SEC_HANDLE handle, SecBufferDesc
 
     /* make sure we use a session key for the signature check, SealMessage always does that,
        even in the dummy case */
-    return verify_signature( ctx, ctx->flags | FLAG_NEGOTIATE_SIGN, msg, &token_buf );
+    return verify_signature( ctx, ctx->flags | NTLMSSP_NEGOTIATE_SIGN, msg, &token_buf );
 }
 
 static SECPKG_USER_FUNCTION_TABLE ntlm_user_table =
@@ -1806,6 +2127,10 @@ BOOL WINAPI DllMain( HINSTANCE hinst, DWORD reason, void *reserved )
         if (__wine_init_unix_call())
             return FALSE;
         DisableThreadLibraryCalls( hinst );
+        break;
+    case DLL_PROCESS_DETACH:
+        if (reserved) break;
+        local_auth_cleanup();
         break;
     }
     return TRUE;
