@@ -1,12 +1,12 @@
 # WineForge
 
 ![WineForge](https://img.shields.io/badge/WineForge-0.6.0.2-blue)
-![Wine](https://img.shields.io/badge/Wine-11.14-8a2be2)
+![Wine](https://img.shields.io/badge/Wine-11.15-8a2be2)
 ![Platform](https://img.shields.io/badge/platform-macOS-lightgrey)
 ![License](https://img.shields.io/badge/license-LGPL--2.1--or--later-green)
 ![Downloads](https://img.shields.io/github/downloads/Alien4042x/WineForge/total)
 
-WineForge is a macOS-focused Wine 11.14 source tree focused on improving Windows game compatibility through D3DMetal, Rosetta, and launcher compatibility.
+WineForge is a macOS-focused Wine 11.15 source tree focused on improving Windows game compatibility through D3DMetal, Rosetta, and launcher compatibility.
 
 It is built around one idea: keep the Wine side understandable while making the Apple Game Porting Toolkit / D3DMetal runtime path easier to test for Windows games on macOS.
 
@@ -15,7 +15,7 @@ This repository is not upstream Wine, not CrossOver, and not a complete runtime 
 Current build identity:
 
 ```text
-wine-11.14 (WineForge 0.6.0.2)
+wine-11.15 (WineForge 0.6.0.2)
 ```
 
 ## Credits
