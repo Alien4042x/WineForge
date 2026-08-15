@@ -26,6 +26,7 @@ SOURCES = \
 	heap.c \
 	large_int.c \
 	loader.c \
+	pe_patches.c \
 	locale.c \
 	math.c \
 	misc.c \
