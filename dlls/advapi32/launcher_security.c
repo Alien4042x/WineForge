@@ -45,6 +45,28 @@ static BOOL string_contains_ci( const WCHAR *string, const WCHAR *needle )
     return FALSE;
 }
 
+static BOOL string_ends_with_ci( const WCHAR *string, const WCHAR *suffix )
+{
+    SIZE_T string_length, suffix_length;
+
+    if (!string || !suffix) return FALSE;
+    string_length = lstrlenW( string );
+    suffix_length = lstrlenW( suffix );
+    return string_length >= suffix_length &&
+           !wcsicmp( string + string_length - suffix_length, suffix );
+}
+
+static BOOL is_battlenet_agent_process(void)
+{
+    WCHAR image_path[MAX_PATH];
+
+    if (!GetModuleFileNameW( NULL, image_path, ARRAY_SIZE(image_path) )) return FALSE;
+    if (!string_ends_with_ci( image_path, L"\\Agent.exe" ) &&
+        !string_ends_with_ci( image_path, L"/Agent.exe" )) return FALSE;
+    return string_contains_ci( image_path, L"\\ProgramData\\Battle.net\\Agent\\" ) ||
+           string_contains_ci( image_path, L"/ProgramData/Battle.net/Agent/" );
+}
+
 static BOOL is_battlenet_security_path( const WCHAR *name )
 {
     unsigned int i;
@@ -80,7 +102,8 @@ void wineforge_adjust_launcher_file_security( const WCHAR *name, PSID *owner, PS
     DWORD error;
     unsigned int i;
 
-    if (!descriptor || !*descriptor || !is_battlenet_security_path( name )) return;
+    if (!descriptor || !*descriptor ||
+        (!is_battlenet_security_path( name ) && !is_battlenet_agent_process())) return;
 
     for (i = 0; i < ARRAY_SIZE(sid_types); i++)
     {
