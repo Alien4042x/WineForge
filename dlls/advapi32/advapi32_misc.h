@@ -31,6 +31,9 @@ BOOL ADVAPI_GetComputerSid(PSID sid);
 BOOL lookup_local_wellknown_name(const LSA_UNICODE_STRING*, PSID, LPDWORD, LPWSTR, LPDWORD, PSID_NAME_USE, BOOL*);
 BOOL lookup_local_user_name(const LSA_UNICODE_STRING*, PSID, LPDWORD, LPWSTR, LPDWORD, PSID_NAME_USE, BOOL*);
 const WCHAR *get_wellknown_privilege_name(const LUID *);
+void wineforge_adjust_launcher_file_security( const WCHAR *name, PSID *owner, PSID *group,
+                                              PACL *dacl, PACL *sacl,
+                                              PSECURITY_DESCRIPTOR *descriptor );
 
 /* memory allocation functions */
 

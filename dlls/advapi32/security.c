@@ -2801,6 +2801,7 @@ DWORD WINAPI GetNamedSecurityInfoW( const WCHAR *name, SE_OBJECT_TYPE type,
         {
             err = GetSecurityInfo( handle, type, info, owner, group, dacl, sacl, descriptor );
             CloseHandle( handle );
+            if (!err) wineforge_adjust_launcher_file_security( name, owner, group, dacl, sacl, descriptor );
         }
         break;
     default:

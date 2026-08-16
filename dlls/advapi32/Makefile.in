@@ -11,6 +11,7 @@ SOURCES = \
 	cred.c \
 	crypt.c \
 	eventlog.c \
+	launcher_security.c \
 	lsa.c \
 	registry.c \
 	security.c \
