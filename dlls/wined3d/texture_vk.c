@@ -802,6 +802,7 @@ BOOL wined3d_texture_vk_prepare_texture(struct wined3d_texture_vk *texture_vk,
     VkImageSubresourceRange vk_range;
     VkImageUsageFlags vk_usage;
     VkImageType vk_image_type;
+    VkImageCreateInfo desc;
     unsigned int flags = 0;
 
     if (texture_vk->t.flags & WINED3D_TEXTURE_RGB_ALLOCATED)
@@ -872,12 +873,14 @@ BOOL wined3d_texture_vk_prepare_texture(struct wined3d_texture_vk *texture_vk,
         texture_vk->layout = VK_IMAGE_LAYOUT_GENERAL;
     }
 
-    if (!wined3d_context_vk_create_image(context_vk, vk_image_type, vk_usage, format_vk->vk_format,
-            resource->width, resource->height, resource->depth, max(1, wined3d_resource_get_sample_count(resource)),
-            texture_vk->t.level_count, texture_vk->t.layer_count, flags, NULL, &texture_vk->image))
-    {
+    wined3d_init_vk_image_info(&desc, vk_image_type, vk_usage, format_vk->vk_format,
+            resource->width, resource->height, resource->depth);
+    desc.flags = flags;
+    desc.samples = max(1, wined3d_resource_get_sample_count(resource));
+    desc.mipLevels = texture_vk->t.level_count;
+    desc.arrayLayers = texture_vk->t.layer_count;
+    if (!wined3d_context_vk_create_image(context_vk, &desc, &texture_vk->image))
         return FALSE;
-    }
 
     /* We can't use a zero src access mask without synchronization2. Set the last-used bind mask to something
      * non-zero to avoid this. */
@@ -1203,21 +1206,26 @@ static void vk_blitter_clear_rendertargets(struct wined3d_context_vk *context_vk
 
     for (i = 0, attachment_count = 0, layer_count = 1; i < rt_count; ++i)
     {
+        struct wined3d_texture *texture;
+        bool view_dependent;
+
         if (!(view = fb->render_targets[i]))
             continue;
+        texture = texture_from_resource(view->resource);
 
         /* Don't delay typeless clears because the data written into the resource depends on the
-         * view format. Except all-zero clears, those should result in zeros in either case.
+         * view format. Except all-zero clears, those should result in zeros in either case. The
+         * same applies to swapchain backbuffers as they may have views with an RGB/sRGB mismatch.
          *
          * We could store the clear format along with the clear value, but then we'd have to
          * create a matching RTV at draw time, which would need its own render pass, thus mooting
          * the point of the delayed clear. (Unless we are lucky enough that the application
          * draws with the same RTV as it clears.) */
+        view_dependent = wined3d_format_is_typeless(texture->resource.format) || texture->swapchain;
+
         if (wined3d_rendertarget_view_is_full_clear(view, draw_rect, clear_rects)
-                && (!wined3d_format_is_typeless(view->resource->format) || (!colour->r && !colour->g
-                && !colour->b && !colour->a)))
+                && (!view_dependent || (!colour->r && !colour->g && !colour->b && !colour->a)))
         {
-            struct wined3d_texture *texture = texture_from_resource(view->resource);
             wined3d_rendertarget_view_validate_location(view, WINED3D_LOCATION_CLEARED);
             wined3d_rendertarget_view_invalidate_location(view, ~WINED3D_LOCATION_CLEARED);
             texture->sub_resources[view->sub_resource_idx].clear_value.colour = *colour;
@@ -1740,10 +1748,12 @@ static DWORD vk_blitter_blit(struct wined3d_blitter *blitter, enum wined3d_blit_
         if (src_format_vk->vk_format != vk_format)
         {
             struct wined3d_image_vk src_image;
+            VkImageCreateInfo image_desc;
 
-            if (!wined3d_context_vk_create_image(context_vk, vk_image_type, usage, vk_format,
-                    resolve_region.extent.width, resolve_region.extent.height, 1,
-                    src_sample_count, 1, 1, 0, NULL, &src_image))
+            wined3d_init_vk_image_info(&image_desc, vk_image_type, usage, vk_format,
+                    resolve_region.extent.width, resolve_region.extent.height, 1);
+            image_desc.samples = src_sample_count;
+            if (!wined3d_context_vk_create_image(context_vk, &image_desc, &src_image))
                 goto barrier_next;
 
             wined3d_context_vk_reference_image(context_vk, &src_image);
@@ -1811,10 +1821,11 @@ static DWORD vk_blitter_blit(struct wined3d_blitter *blitter, enum wined3d_blit_
         if (dst_format_vk->vk_format != vk_format || !raw)
         {
             struct wined3d_image_vk dst_image;
+            VkImageCreateInfo image_desc;
 
-            if (!wined3d_context_vk_create_image(context_vk, vk_image_type, usage, vk_format,
-                    resolve_region.extent.width, resolve_region.extent.height, 1,
-                    VK_SAMPLE_COUNT_1_BIT, 1, 1, 0, NULL, &dst_image))
+            wined3d_init_vk_image_info(&image_desc, vk_image_type, usage, vk_format,
+                    resolve_region.extent.width, resolve_region.extent.height, 1);
+            if (!wined3d_context_vk_create_image(context_vk, &image_desc, &dst_image))
                 goto barrier_next;
 
             wined3d_context_vk_reference_image(context_vk, &dst_image);

@@ -607,6 +607,8 @@ BOOL WINAPI NtUserAttachThreadInput( DWORD from, DWORD to, BOOL attach )
 {
     BOOL ret;
 
+    TRACE( "from %04x, to %04x, attach %u\n", from, to, attach );
+
     SERVER_START_REQ( attach_thread_input )
     {
         req->tid_from = from;
@@ -3129,6 +3131,7 @@ BOOL WINAPI NtUserGetPointerInfoList( UINT32 id, POINTER_INPUT_TYPE type, UINT_P
     TRACE( "id %d, type %#x, unk0 %#lx, unk1 %#lx, size %#lx, entry_count %p, pointer_count %p, pointer_info %p\n",
             id, type, (long)unk0, (long)unk1, size, entry_count, pointer_count, pointer_info );
 
+    /* same checks in wow64_NtUserGetPointerInfoList */
     switch (type)
     {
     case PT_MOUSE:

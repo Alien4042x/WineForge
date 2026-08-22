@@ -289,8 +289,6 @@ extern NTSTATUS send_debug_event( struct thread_data *data, EXCEPTION_RECORD *re
                                   CONTEXT *context, BOOL first_chance, BOOL exception );
 extern NTSTATUS set_thread_context( HANDLE handle, const void *context, BOOL *self, USHORT machine );
 extern NTSTATUS get_thread_context( HANDLE handle, void *context, BOOL *self, USHORT machine );
-extern unsigned int alloc_object_attributes( const OBJECT_ATTRIBUTES *attr, struct object_attributes **ret,
-                                             data_size_t *ret_len );
 extern NTSTATUS system_time_precise( void *args );
 
 extern void *anon_mmap_fixed( void *start, size_t size, int prot, int flags );

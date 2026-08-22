@@ -3066,7 +3066,7 @@ static void test_create_texture2d(void)
         {DXGI_FORMAT_R8G8B8A8_SNORM,          1, D3D11_BIND_RENDER_TARGET,    0, TRUE,  FALSE},
         {DXGI_FORMAT_R8G8B8A8_SINT,           1, D3D11_BIND_RENDER_TARGET,    0, TRUE,  FALSE},
         {DXGI_FORMAT_R8G8B8A8_UNORM,          1, D3D11_BIND_RENDER_TARGET,    D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX,
-                FALSE, TRUE},
+                FALSE, FALSE},
         {DXGI_FORMAT_D24_UNORM_S8_UINT,       1, D3D11_BIND_SHADER_RESOURCE,  0, FALSE, TRUE},
         {DXGI_FORMAT_D24_UNORM_S8_UINT,       1, D3D11_BIND_RENDER_TARGET,    0, FALSE, FALSE},
         {DXGI_FORMAT_D32_FLOAT,               1, D3D11_BIND_SHADER_RESOURCE,  0, FALSE, TRUE},
@@ -15961,17 +15961,19 @@ static void test_swapchain_formats(const D3D_FEATURE_LEVEL feature_level)
 
 static void test_swapchain_views(void)
 {
+    ID3D11RenderTargetView *rtv_rgb, *rtv_srgb;
     D3D11_SHADER_RESOURCE_VIEW_DESC srv_desc;
     struct d3d11_test_context test_context;
     D3D11_RENDER_TARGET_VIEW_DESC rtv_desc;
     ID3D11ShaderResourceView *srv;
     ID3D11DeviceContext *context;
-    ID3D11RenderTargetView *rtv;
     ID3D11Device *device;
     ULONG refcount;
     HRESULT hr;
 
     static const struct vec4 color = {0.2f, 0.3f, 0.5f, 1.0f};
+    static const RECT r1 = {15, 15, 16, 16};
+    static const RECT r2 = {5, 5, 6, 6};
 
     if (!init_test_context(&test_context, NULL))
         return;
@@ -15985,12 +15987,19 @@ static void test_swapchain_views(void)
     draw_color_quad(&test_context, &color);
     check_texture_color(test_context.backbuffer, 0xff7f4c33, 1);
 
-    rtv_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+    rtv_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
     rtv_desc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
     rtv_desc.Texture2D.MipSlice = 0;
-    hr = ID3D11Device_CreateRenderTargetView(device, (ID3D11Resource *)test_context.backbuffer, &rtv_desc, &rtv);
+    hr = ID3D11Device_CreateRenderTargetView(device, (ID3D11Resource *)test_context.backbuffer,
+            &rtv_desc, &rtv_rgb);
     ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
-    ID3D11DeviceContext_OMSetRenderTargets(context, 1, &rtv, NULL);
+
+    rtv_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+    hr = ID3D11Device_CreateRenderTargetView(device, (ID3D11Resource *)test_context.backbuffer,
+            &rtv_desc, &rtv_srgb);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    ID3D11DeviceContext_OMSetRenderTargets(context, 1, &rtv_srgb, NULL);
 
     refcount = get_refcount(test_context.backbuffer);
     ok(refcount == 1, "Got unexpected refcount %lu.\n", refcount);
@@ -16007,7 +16016,16 @@ static void test_swapchain_views(void)
     if (SUCCEEDED(hr))
         ID3D11ShaderResourceView_Release(srv);
 
-    ID3D11RenderTargetView_Release(rtv);
+    /* Clear with an RGB view, draw with sRGB view and make sure the clear color has no sRGB
+     * correction applied. */
+    ID3D11DeviceContext_ClearRenderTargetView(context, rtv_rgb, (const float *)&color);
+    set_viewport(context, 0.0f, 0.0f, 10.0f, 10.0f, 0.0f, 1.0f);
+    draw_color_quad(&test_context, &color);
+    check_texture_sub_resource_color(test_context.backbuffer, 0, &r1, 0xff7f4c33, 1);
+    check_texture_sub_resource_color(test_context.backbuffer, 0, &r2, 0xffbc957c, 1);
+
+    ID3D11RenderTargetView_Release(rtv_srgb);
+    ID3D11RenderTargetView_Release(rtv_rgb);
     release_test_context(&test_context);
 }
 
@@ -35222,7 +35240,7 @@ static void test_shared_resource(D3D_FEATURE_LEVEL feature_level)
                     || broken(hr == E_OUTOFMEMORY) /* software device before Win8 */,
                     "got %#lx.\n", hr);
         else
-            todo_wine ok(hr == E_INVALIDARG, "got %#lx.\n", hr);
+            ok(hr == E_INVALIDARG, "got %#lx.\n", hr);
         if (FAILED(hr))
             goto test_done;
 

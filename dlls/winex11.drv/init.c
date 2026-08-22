@@ -382,24 +382,19 @@ static void X11DRV_client_surface_present( struct client_surface *client, HDC hd
 {
     struct x11drv_client_surface *surface = impl_from_client_surface( client );
     HWND hwnd = client->hwnd, toplevel = client->toplevel;
-    RECT rect_dst, rect_src = client->virtual_rect, rect;
+    RECT rect_dst = client->monitor_rect, rect_src = client->virtual_rect, rect;
     Drawable window;
     HRGN region;
 
     if (!hdc) return;
     window = X11DRV_get_whole_window( toplevel );
 
-    if (NtUserGetPresentRect( toplevel, &rect_dst, -1 /* raw dpi */ ))
-    {
-        region = 0; /* window is exclusive fullscreen, ignore everything else */
-        if (toplevel != hwnd) return; /* toplevel is exclusive fullscreen, don't present */
-        OffsetRect( &rect_dst, -rect_dst.left, -rect_dst.top );
-    }
-    else
-    {
-        region = get_dc_monitor_region( hwnd, hdc ); /* otherwise use the window region for clipping rules */
-        rect_dst = client->monitor_rect;
-    }
+    /* if window is exclusive fullscreen, ignore the window region clipping rules */
+    if (hwnd == toplevel && NtUserGetPresentRect( toplevel, &rect, -1 /* raw dpi */ )) region = 0;
+    else region = get_dc_monitor_region( hwnd, hdc );
+
+    TRACE( "hwnd %p %s to toplevel %p %s region %p\n", hwnd, wine_dbgstr_rect(&rect_src),
+           toplevel, wine_dbgstr_rect(&rect_dst), region );
 
     if (get_dc_drawable( surface->hdc_dst, &rect ) != window || !EqualRect( &rect, &rect_dst ))
         set_dc_drawable( surface->hdc_dst, window, &rect_dst, IncludeInferiors );
@@ -443,7 +438,7 @@ struct client_surface *X11DRV_CreateClientSurface( HWND hwnd, int format )
     else colormap = XCreateColormap( gdi_display, get_dummy_parent(), visual.visual, visual_class_alloc( visual.class ) );
     if (!colormap) return NULL;
 
-    if (!(surface = client_surface_create( sizeof(*surface), &x11drv_client_surface_funcs, hwnd ))) goto failed;
+    if (!(surface = client_surface_create( sizeof(*surface), &x11drv_client_surface_funcs, hwnd, format ))) goto failed;
     surface->colormap = colormap;
     if (!(surface->window = create_client_window( hwnd, surface->client.virtual_rect, &visual, colormap ))) goto failed;
 
