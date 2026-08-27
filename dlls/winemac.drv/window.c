@@ -45,6 +45,37 @@ static CFMutableDictionaryRef win_datas;
 
 static unsigned int activate_on_focus_time;
 
+/* WineForge-Internal: launcher-compat/ea-app-focus-return-redraw-v1. */
+static LONG ea_app_redraw_pending;
+
+static BOOL is_ea_desktop_process(void)
+{
+    static const WCHAR install_dirW[] =
+    {
+        '\\','P','r','o','g','r','a','m',' ','F','i','l','e','s','\\',
+        'E','l','e','c','t','r','o','n','i','c',' ','A','r','t','s','\\',
+        'E','A',' ','D','e','s','k','t','o','p','\\',0
+    };
+    static const WCHAR image_suffixW[] =
+    {
+        '\\','E','A',' ','D','e','s','k','t','o','p','\\',
+        'E','A','D','e','s','k','t','o','p','.','e','x','e',0
+    };
+    const UNICODE_STRING *path = &NtCurrentTeb()->Peb->ProcessParameters->ImagePathName;
+    unsigned int path_len = path->Length / sizeof(WCHAR);
+    unsigned int install_len = ARRAY_SIZE(install_dirW) - 1;
+    unsigned int suffix_len = ARRAY_SIZE(image_suffixW) - 1;
+    unsigned int i;
+
+    if (!path->Buffer || path_len < install_len + suffix_len) return FALSE;
+    if (wcsnicmp( path->Buffer + path_len - suffix_len,
+                  image_suffixW, suffix_len )) return FALSE;
+
+    for (i = 0; i <= path_len - install_len; ++i)
+        if (!wcsnicmp( path->Buffer + i, install_dirW, install_len )) return TRUE;
+    return FALSE;
+}
+
 
 /* per-monitor DPI aware NtUserSetWindowPos call */
 static BOOL set_window_pos(HWND hwnd, HWND after, INT x, INT y, INT cx, INT cy, UINT flags)
@@ -1933,7 +1964,16 @@ void macdrv_window_got_focus(HWND hwnd, const macdrv_event *event)
     if (can_window_become_foreground(hwnd) && !(style & WS_MINIMIZE))
     {
         TRACE("setting foreground window to %p\n", hwnd);
-        NtUserSetForegroundWindowInternal(hwnd);
+        if (NtUserSetForegroundWindowInternal(hwnd) &&
+            NtUserGetAncestor(hwnd, GA_ROOT) == hwnd && is_ea_desktop_process() &&
+            InterlockedExchange(&ea_app_redraw_pending, FALSE))
+        {
+            /* WineForge-Internal: launcher-compat/ea-app-focus-return-redraw-v1. */
+            NtUserRedrawWindow(hwnd, NULL, 0,
+                               RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN);
+            NtUserPostMessage(hwnd, WM_PAINT, 0, 0);
+            TRACE("redrew EA App window %p after focus return\n", hwnd);
+        }
         return;
     }
 
@@ -1952,6 +1992,10 @@ void macdrv_window_lost_focus(HWND hwnd, const macdrv_event *event)
     if (!hwnd) return;
 
     TRACE("win %p/%p fg %p\n", hwnd, event->window, NtUserGetForegroundWindow());
+
+    /* WineForge-Internal: launcher-compat/ea-app-focus-return-redraw-v1. */
+    if (NtUserGetAncestor(hwnd, GA_ROOT) == hwnd && is_ea_desktop_process())
+        InterlockedExchange(&ea_app_redraw_pending, TRUE);
 
     if (hwnd == NtUserGetForegroundWindow())
     {
