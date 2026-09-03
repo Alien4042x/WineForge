@@ -273,6 +273,22 @@ void wfdx_launcher_activate( HMODULE d3d11 )
             companion, d3d11 );
 }
 
+/* WineForge-Internal: wfdxcompat/d3d10-late-device-dispatch-v1.
+ * Only expose the companion entry point after process-local activation succeeded. */
+void *WINAPI __wine_get_wfdx_d3d10_create_device(void)
+{
+    ULONG_PTR cookie;
+    BOOL active;
+    void *proc;
+
+    if (LdrLockLoaderLock( 0, NULL, &cookie )) return NULL;
+    active = wfdx_launcher_interposition_active;
+    proc = active ? wfdx_launcher_dxgi_d3d10_create_device : NULL;
+    LdrUnlockLoaderLock( 0, cookie );
+    TRACE( "WFDX D3D10 device dispatch query, active %u, proc %p\n", active, proc );
+    return proc;
+}
+
 /* WineForge-Internal: wfdxcompat/launcher-process-interposition-v1. */
 void *wfdx_launcher_get_import( HMODULE module, const char *name )
 {

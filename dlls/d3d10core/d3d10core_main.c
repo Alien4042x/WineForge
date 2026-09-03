@@ -39,15 +39,28 @@ HRESULT WINAPI D3D10CoreRegisterLayers(void)
 HRESULT WINAPI D3D10CoreCreateDevice(IDXGIFactory *factory, IDXGIAdapter *adapter,
         unsigned int flags, D3D_FEATURE_LEVEL feature_level, ID3D10Device **device)
 {
+    HRESULT (WINAPI *create_device)(HMODULE, IDXGIFactory *, IDXGIAdapter *,
+            unsigned int, const D3D_FEATURE_LEVEL *, unsigned int, void **) = DXGID3D10CreateDevice;
     IUnknown *dxgi_device;
-    HMODULE d3d11;
+    HMODULE d3d11, ntdll;
     HRESULT hr;
 
     TRACE("factory %p, adapter %p, flags %#x, feature_level %#x, device %p.\n",
             factory, adapter, flags, feature_level, device);
 
     d3d11 = LoadLibraryA("d3d11.dll");
-    hr = DXGID3D10CreateDevice(d3d11, factory, adapter, flags, &feature_level, 1, (void **)&dxgi_device);
+    /* WineForge-Internal: wfdxcompat/d3d10-late-device-dispatch-v1.
+     * Loading D3D11 can activate the launcher companion after our DXGI import
+     * was bound. Keep that import unless the loader confirms activation. */
+    if ((ntdll = GetModuleHandleA("ntdll.dll")))
+    {
+        void *(WINAPI *get_wfdx_proc)(void);
+        void *proc;
+
+        get_wfdx_proc = (void *)GetProcAddress(ntdll, "__wine_get_wfdx_d3d10_create_device");
+        if (get_wfdx_proc && (proc = get_wfdx_proc())) create_device = proc;
+    }
+    hr = create_device(d3d11, factory, adapter, flags, &feature_level, 1, (void **)&dxgi_device);
     FreeLibrary(d3d11);
     if (FAILED(hr))
     {

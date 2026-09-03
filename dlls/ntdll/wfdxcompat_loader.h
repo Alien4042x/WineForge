@@ -31,4 +31,7 @@ void wfdx_launcher_activate( HMODULE d3d11 );
 void *wfdx_launcher_get_import( HMODULE module, const char *name );
 void *wfdx_launcher_get_proc( HMODULE module, const ANSI_STRING *name );
 
+/* WineForge-Internal: wfdxcompat/d3d10-late-device-dispatch-v1. */
+void *WINAPI __wine_get_wfdx_d3d10_create_device(void);
+
 #endif /* __WINE_WFDXCOMPAT_LOADER_H */
