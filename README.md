@@ -1,6 +1,6 @@
 # WineForge
 
-![WineForge](https://img.shields.io/badge/WineForge-0.6.0.3-blue)
+![WineForge](https://img.shields.io/badge/WineForge-0.6.0.4-blue)
 ![Wine](https://img.shields.io/badge/Wine-11.16-8a2be2)
 ![Platform](https://img.shields.io/badge/platform-macOS-lightgrey)
 ![License](https://img.shields.io/badge/license-LGPL--2.1--or--later-green)
@@ -10,12 +10,14 @@ WineForge is a macOS-focused Wine 11.16 source tree focused on improving Windows
 
 It is built around one idea: keep the Wine side understandable while making the Apple Game Porting Toolkit / D3DMetal runtime path easier to test for Windows games on macOS.
 
+For users who do not want to configure Wine manually, the packaged [WineForge release](https://github.com/Alien4042x/WineForge/releases) includes the WineForge Launcher, a convenient graphical interface for managing bottles, game launchers, installed games, and runtime settings.
+
 This repository is not upstream Wine, not CrossOver, and not a complete runtime bundle. It is a prepared Wine source tree with a focused patch set.
 
 Current build identity:
 
 ```text
-wine-11.16 (WineForge 0.6.0.3)
+wine-11.16 (WineForge 0.6.0.4)
 ```
 
 ## Credits
@@ -274,7 +276,7 @@ Unsupported waits and sensitive synchronization semantics remain on the Wine ser
 
 ## Status
 
-WineForge 0.6.0.3 is the current stable WineForge release line for tested macOS gaming workflows.
+WineForge 0.6.0.4 is the current stable WineForge release line for tested macOS gaming workflows.
 
 Compatibility remains application-specific. Unsupported games and launchers may still require profiling or targeted compatibility patches, but this does not change the release status of the tested WineForge runtime.
 
