@@ -79,7 +79,8 @@ SOURCES = \
 	unix/wfusync.c \
 	unwind.c \
 	version.c \
-	wcstring.c
+	wcstring.c \
+	wfdxcompat_loader.c
 
 EXTRA_OBJS = unix/version.o
 
