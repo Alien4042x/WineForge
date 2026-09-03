@@ -12,6 +12,8 @@ It is built around one idea: keep the Wine side understandable while making the 
 
 For users who do not want to configure Wine manually, the packaged [WineForge release](https://github.com/Alien4042x/WineForge/releases) includes the WineForge Launcher, a convenient graphical interface for managing bottles, game launchers, installed games, and runtime settings.
 
+<img width="1486" height="906" alt="WineForge-launcher" src="https://github.com/user-attachments/assets/c4447308-f9af-4401-b801-4594b6c8bf50" />
+
 This repository is not upstream Wine, not CrossOver, and not a complete runtime bundle. It is a prepared Wine source tree with a focused patch set.
 
 Current build identity:
