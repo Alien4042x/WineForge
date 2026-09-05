@@ -1131,6 +1131,7 @@ SOURCES = \
 	wine/irpcss.idl \
 	wine/itss.idl \
 	wine/list.h \
+	wine/lsass.idl \
 	wine/mfinternal.idl \
 	wine/mmsystem16.h \
 	wine/mscvpdb.h \

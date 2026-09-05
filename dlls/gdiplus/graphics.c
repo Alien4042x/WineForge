@@ -7769,7 +7769,10 @@ GpStatus WINGDIPAPI GdipMeasureDriverString(GpGraphics *graphics, GDIPCONST UINT
         length = lstrlenW(text);
 
     if (length == 0)
+    {
         set_rect(boundingBox, 0.0f, 0.0f, 0.0f, 0.0f);
+        return Ok;
+    }
 
     if (flags & unsupported_flags)
         FIXME("Ignoring flags %x\n", flags & unsupported_flags);
