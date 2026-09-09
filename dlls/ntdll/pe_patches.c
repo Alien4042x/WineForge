@@ -54,6 +54,11 @@ struct wineforge_patch_set
     const struct wineforge_patch_fragment *fragments;
     unsigned int fragment_count;
     void (*custom_apply)(void);
+    /* WineForge-Internal: ntdll/verified-pe-patch-deferred-module-v1.
+     * Retry a custom handler when this dependency loads, but only after the
+     * original rule matched. State is process-local under the loader lock. */
+    const WCHAR *retry_module_name;
+    BOOL matched;
 };
 
 #define WF_PATCH_SIZE(before, after) \
@@ -263,7 +268,7 @@ static void apply_steam_d3dmetal_dxgi_thunks(void)
 }
 #endif
 
-static const struct wineforge_patch_set patch_sets[] =
+static struct wineforge_patch_set patch_sets[] =
 {
 #ifdef __i386__
     {
@@ -278,6 +283,8 @@ static const struct wineforge_patch_set patch_sets[] =
         ubisoft_cef_fragments,
         ARRAY_SIZE(ubisoft_cef_fragments),
         NULL,
+        NULL,
+        FALSE,
     },
 #endif
 #ifdef __x86_64__
@@ -293,13 +300,15 @@ static const struct wineforge_patch_set patch_sets[] =
         NULL,
         0,
         apply_steam_d3dmetal_dxgi_thunks,
+        L"dxgi.dll",
+        FALSE,
     },
 #endif
     {0},
 };
 
 /* WineForge-Internal: ntdll/verified-pe-patch-manager-v1. */
-static void apply_patch_set( const struct wineforge_patch_set *set, const WCHAR *module_path,
+static void apply_patch_set( struct wineforge_patch_set *set, const WCHAR *module_path,
                              void *module_base, SIZE_T image_size, BOOL is_builtin )
 {
     IMAGE_NT_HEADERS *nt = RtlImageNtHeader( module_base );
@@ -317,6 +326,9 @@ static void apply_patch_set( const struct wineforge_patch_set *set, const WCHAR 
     if (set->should_apply && !set->should_apply()) return;
     if (set->custom_apply)
     {
+        /* WineForge-Internal: ntdll/verified-pe-patch-deferred-module-v1. */
+        set->matched = TRUE;
+        TRACE( "matched %s for %s\n", set->identifier, debugstr_w(module_path) );
         set->custom_apply();
         return;
     }
@@ -375,10 +387,18 @@ void wineforge_apply_pe_patches( const WCHAR *module_name, const WCHAR *module_p
 
     for (i = 0; patch_sets[i].identifier; ++i)
     {
-        const struct wineforge_patch_set *set = &patch_sets[i];
+        struct wineforge_patch_set *set = &patch_sets[i];
 
         if (!wcsicmp( module_name, set->module_name ))
             apply_patch_set( set, module_path, module_base, image_size, is_builtin );
+        /* WineForge-Internal: ntdll/verified-pe-patch-deferred-module-v1.
+         * The custom handler still validates the dependency's image and bytes. */
+        else if (set->matched && set->custom_apply && set->retry_module_name &&
+                 !wcsicmp( module_name, set->retry_module_name ))
+        {
+            TRACE( "retrying %s after loading %s\n", set->identifier, debugstr_w(module_path) );
+            set->custom_apply();
+        }
     }
 }
 
