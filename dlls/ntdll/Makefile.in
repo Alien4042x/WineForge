@@ -57,6 +57,8 @@ SOURCES = \
 	unix/dxmt_loader.c \
 	unix/env.c \
 	unix/file.c \
+	unix/graphics_policy.c \
+	unix/launcher_policy.c \
 	unix/loader.c \
 	unix/loadorder.c \
 	unix/process.c \

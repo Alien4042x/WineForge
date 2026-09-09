@@ -332,6 +332,20 @@ extern void virtual_set_large_address_space(void);
 extern void virtual_fill_image_information( const struct pe_image_info *pe_info,
                                             SECTION_IMAGE_INFORMATION *info );
 extern void *get_builtin_so_handle( void *module );
+/* WineForge-Internal: launcher-compat/process-classification-v1. */
+struct launcher_policy
+{
+    BOOL cef_software;
+    BOOL battlenet_cef_cow;
+    BOOL dxmt;
+    BOOL wfdx;
+};
+
+extern void get_launcher_policy( const char *image_path, struct launcher_policy *policy );
+extern BOOL steam_cef_native_vulkan_loader( const UNICODE_STRING *nt_name, const char *module );
+/* WineForge-Internal: graphics/process-backend-policy-v1. */
+extern void init_process_graphics_backend( const WCHAR *image_path );
+extern BOOL cef_software_policy_enabled(void);
 extern BOOL d3dmetal_graphics_backend_enabled(void);
 extern char *get_d3dmetal_dll_path(void);
 extern BOOL is_d3dmetal_module_name( const char *path );
