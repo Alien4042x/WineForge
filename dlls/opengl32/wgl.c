@@ -518,9 +518,16 @@ static struct display_lists *display_lists_acquire( struct display_lists *lists 
 
 static void display_lists_release( struct display_lists *lists, BOOL destroy )
 {
-    struct glDeleteSync_params delete_sync = { .teb = NtCurrentTeb() };
+    BOOL current;
 
     if (InterlockedDecrement( &lists->refcount )) return;
+
+    /* make sure there's a (dummy) context before destroying display list objects */
+    if ((current = destroy && !NtCurrentTeb()->glCurrentRC))
+    {
+        struct wglMakeContextCurrentARB_params args = { .teb = NtCurrentTeb(), .hglrc = (HGLRC)-1 };
+        UNIX_CALL( wglMakeContextCurrentARB, &args );
+    }
 
     for (UINT i = 0; i < OBJ_TYPE_COUNT; i++)
         free_object_table( lists->tables + i, destroy );
@@ -528,11 +535,17 @@ static void display_lists_release( struct display_lists *lists, BOOL destroy )
     for (int i = 0; i < lists->syncs.count; i++)
     {
         struct handle_entry *entry = lists->syncs.handles + i;
+        struct glDeleteSync_params delete_sync = { .teb = NtCurrentTeb(), .sync = entry->user_data };
         if (LOWORD(entry->handle) == 0xffff) continue;
         WARN( "Leaking sync client %#x, host %p\n", entry->handle, entry->user_data );
-        delete_sync.sync = entry->user_data;
         if (destroy) UNIX_CALL( glDeleteSync, &delete_sync );
         free( entry->user_data );
+    }
+
+    if (current)
+    {
+        struct wglMakeContextCurrentARB_params args = { .teb = NtCurrentTeb() };
+        UNIX_CALL( wglMakeContextCurrentARB, &args );
     }
 
     free( lists );
@@ -1117,8 +1130,6 @@ BOOL WINAPI wglDeleteContext( HGLRC handle )
     if ((status = UNIX_CALL( wglDeleteContext, &args ))) WARN( "wglDeleteContext returned %#lx\n", status );
     if (status || !args.ret) return FALSE;
 
-    /* make sure there's a (dummy) context before releasing and destroying display list objects */
-    if (!teb->glCurrentRC) wglMakeContextCurrentARB( NULL, NULL, NULL );
     free_client_context( ptr );
     return TRUE;
 }
@@ -1990,6 +2001,15 @@ static void compare_formats_ctx_set_attrib( struct compare_formats_ctx *ctx,
     if (i == ctx->num_attribs) ++ctx->num_attribs;
 }
 
+static const char *debugstr_pixel_format( const struct wgl_pixel_format *fmt )
+{
+    if (!fmt) return "(null)";
+    return wine_dbg_sprintf( "%04lx %#x col %u:%u/%u/%u/%u acc %u:%u/%u/%u/%u ds:%u/%u swp:%#x pb:%u smp:%u srgb:%u", fmt->pfd.dwFlags, fmt->pfd.iPixelType, fmt->pfd.cColorBits, fmt->pfd.cRedBits,
+                             fmt->pfd.cGreenBits, fmt->pfd.cBlueBits, fmt->pfd.cAlphaBits, fmt->pfd.cAccumBits, fmt->pfd.cAccumRedBits, fmt->pfd.cAccumGreenBits,
+                             fmt->pfd.cAccumBlueBits, fmt->pfd.cAccumAlphaBits, fmt->pfd.cDepthBits, fmt->pfd.cStencilBits, fmt->swap_method, fmt->draw_to_pbuffer,
+                             fmt->samples, fmt->framebuffer_srgb_capable );
+}
+
 /***********************************************************************
  *		wglChoosePixelFormatARB (OPENGL32.@)
  */
@@ -2012,11 +2032,13 @@ BOOL WINAPI wglChoosePixelFormatARB( HDC hdc, const int *attribs_int, const FLOA
     /* Gather, validate and deduplicate all attributes */
     for (i = 0; attribs_int && attribs_int[i]; i += 2)
     {
+        TRACE( "attribs (int) %#x: %#x\n", attribs_int[i], attribs_int[i + 1] );
         if (wgl_attrib_match_criteria( attribs_int[i] ) == ATTRIB_MATCH_INVALID) return FALSE;
         compare_formats_ctx_set_attrib( &ctx, attribs_int[i], attribs_int[i + 1] );
     }
     for (i = 0; attribs_float && attribs_float[i]; i += 2)
     {
+        TRACE( "attribs (float) %#x: %f\n", (int)attribs_float[i], attribs_float[i + 1] );
         if (wgl_attrib_match_criteria( attribs_float[i] ) == ATTRIB_MATCH_INVALID) return FALSE;
         compare_formats_ctx_set_attrib( &ctx, attribs_float[i], attribs_float[i + 1] );
     }
@@ -2051,6 +2073,8 @@ BOOL WINAPI wglChoosePixelFormatARB( HDC hdc, const int *attribs_int, const FLOA
     *num_formats = 0;
     for (i = 0; i < num_wgl_formats && i < max_formats && format_array[i]; ++i)
     {
+        const struct wgl_pixel_format *pf = format_array[i];
+        TRACE( "returning %Iu: %s\n", pf - wgl_formats + 1, debugstr_pixel_format(pf) );
         ++*num_formats;
         formats[i] = format_array[i] - wgl_formats + 1;
     }

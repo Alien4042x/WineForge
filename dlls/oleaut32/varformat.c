@@ -822,7 +822,7 @@ HRESULT WINAPI VarTokenizeFormatString(LPOLESTR lpszFormat, LPBYTE rgbTok,
        */
       header->type = FMT_TYPE_DATE;
       NEED_SPACE(sizeof(BYTE));
-      pFormat += ARRAY_SIZE(szAMSlashPM);
+      pFormat++;
       *pOut++ = FMT_DATE_GENERAL;
       TRACE("gen date\n");
     }
@@ -2383,7 +2383,7 @@ HRESULT WINAPI VarFormatPercent(LPVARIANT pVarIn, INT nDigits, INT nLeading, INT
       if (SUCCEEDED(hRet))
       {
         DWORD dwLen = lstrlenW(*pbstrOut);
-        BOOL bBracket = (*pbstrOut)[dwLen] == ')';
+        BOOL bBracket = (*pbstrOut)[dwLen - 1] == ')';
 
         dwLen -= bBracket;
         memcpy(buff, *pbstrOut, dwLen * sizeof(WCHAR));

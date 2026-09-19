@@ -660,8 +660,8 @@ static BOOL declaration_equals(const D3DVERTEXELEMENT9 *declaration1, const D3DV
     UINT size1 = 0, size2 = 0;
 
     /* Find the size of each declaration */
-    while (declaration1[size1].Stream != 0xff) size1++;
-    while (declaration2[size2].Stream != 0xff) size2++;
+    while (size1 < MAX_FVF_DECL_SIZE && declaration1[size1].Stream != 0xff) size1++;
+    while (size2 < MAX_FVF_DECL_SIZE && declaration2[size2].Stream != 0xff) size2++;
 
     /* If not same size then they are definitely not equal */
     if (size1 != size2)
@@ -1380,14 +1380,19 @@ static HRESULT WINAPI d3dx9_mesh_UpdateSemantics(ID3DXMesh *iface, D3DVERTEXELEM
         return D3DERR_INVALIDCALL;
     }
 
-    /* New declaration must not contain non-zero Stream value  */
-    for (i = 0; declaration[i].Stream != 0xff; i++)
+    /* New declaration must not contain non-zero Stream values */
+    for (i = 0; i < MAX_FVF_DECL_SIZE && declaration[i].Stream != 0xff; i++)
     {
         if (declaration[i].Stream != 0)
         {
             WARN("Invalid declaration. New declaration contains non-zero Stream value.\n");
             return D3DERR_INVALIDCALL;
         }
+    }
+    if (i >= MAX_FVF_DECL_SIZE)
+    {
+        WARN("Declaration is too long, ignoring.\n");
+        return D3D_OK;
     }
 
     This->num_elem = i + 1;
@@ -1671,11 +1676,12 @@ static HRESULT WINAPI d3dx9_mesh_OptimizeInplace(ID3DXMesh *iface, DWORD flags, 
         return E_NOTIMPL;
     }
 
+    dword_indices = malloc(This->numfaces * 3 * sizeof(DWORD));
+    if (!dword_indices) return E_OUTOFMEMORY;
+
     hr = iface->lpVtbl->LockIndexBuffer(iface, 0, &indices);
     if (FAILED(hr)) goto cleanup;
 
-    dword_indices = malloc(This->numfaces * 3 * sizeof(DWORD));
-    if (!dword_indices) return E_OUTOFMEMORY;
     if (This->options & D3DXMESH_32BIT) {
         memcpy(dword_indices, indices, This->numfaces * 3 * sizeof(DWORD));
     } else {
@@ -2269,10 +2275,15 @@ HRESULT WINAPI D3DXCreateMesh(DWORD numfaces, DWORD numvertices, DWORD options,
     {
         return D3DERR_INVALIDCALL;
     }
-    for (i = 0; declaration[i].Stream != 0xff; i++)
+    for (i = 0; i < MAX_FVF_DECL_SIZE - 1 && declaration[i].Stream != 0xff; i++)
         if (declaration[i].Stream != 0)
             return D3DERR_INVALIDCALL;
     num_elem = i + 1;
+    if (num_elem >= MAX_FVF_DECL_SIZE)
+    {
+        WARN("Declaration is too long.\n");
+        return D3DERR_INVALIDCALL;
+    }
 
     if (options & D3DXMESH_32BIT)
         index_format = D3DFMT_INDEX32;
@@ -2866,7 +2877,7 @@ static HRESULT parse_normals(ID3DXFileData *filedata, struct mesh_data *mesh, DW
     mesh->num_normals = *(uint32_t *)data;
     data += sizeof(uint32_t);
     if (data_size < sizeof(uint32_t) * 2 + mesh->num_normals * sizeof(D3DXVECTOR3) +
-            num_face_indices * sizeof(uint32_t))
+            mesh->num_poly_faces * sizeof(uint32_t) + num_face_indices * sizeof(uint32_t))
     {
         WARN("Truncated data (%Id bytes).\n", data_size);
         goto end;
@@ -2965,7 +2976,7 @@ static HRESULT parse_skin_mesh_header(ID3DXFileData *filedata, struct mesh_data 
 static HRESULT parse_skin_weights_info(ID3DXFileData *filedata, struct mesh_data *mesh_data, DWORD flags)
 {
     unsigned int index = mesh_data->skin_weights_info_count;
-    unsigned int influence_count;
+    uint32_t influence_count;
     const char *name;
     const BYTE *data;
     SIZE_T data_size;
@@ -2984,6 +2995,13 @@ static HRESULT parse_skin_weights_info(ID3DXFileData *filedata, struct mesh_data
 
     if (FAILED(hr = filedata->lpVtbl->Lock(filedata, &data_size, (const void **)&data)))
         return hr;
+
+    if (data_size < sizeof(name) + sizeof(influence_count))
+    {
+        WARN("Truncated data (%Id bytes).\n", data_size);
+        filedata->lpVtbl->Unlock(filedata);
+        return E_FAIL;
+    }
 
     /* FIXME: String will have to be retrieved directly instead of through a
      * pointer once our ID3DXFileData implementation is fixed. */

@@ -11432,11 +11432,24 @@ static LRESULT WINAPI WmPrintProcA(HWND hwnd, UINT message, WPARAM wp, LPARAM lp
     {
     case WM_PRINT:
     {
-        static RECT rect = {0, 0, 1, 1};
+        RECT rect, expected_rect;
+        int has_clip_rgn, ret;
+        HDC hdc = (HDC)wp;
+        HRGN clip_rgn;
         HBRUSH brush;
 
+        clip_rgn = CreateRectRgn(0, 0, 1, 1);
+        has_clip_rgn = GetClipRgn(hdc, clip_rgn);
+        ok(has_clip_rgn == 1, "Expected a clip region.\n");
+        ret = GetRgnBox(clip_rgn, &rect);
+        ok(ret == SIMPLEREGION, "Got unexpected ret %d.\n", ret);
+        SetRect(&expected_rect, 50, 50, 100, 100);
+        ok(EqualRect(&rect, &expected_rect), "Got unexpected rect %s.\n", wine_dbgstr_rect(&rect));
+        DeleteObject(clip_rgn);
+
         brush = CreateSolidBrush(RGB(0xff, 0, 0));
-        FillRect((HDC)wp, &rect, brush);
+        SetRect(&rect, 0, 0, 1, 1);
+        FillRect(hdc, &rect, brush);
         DeleteObject(brush);
         return 0;
     }
@@ -21414,6 +21427,23 @@ static void test_defwinproc_wm_print(void)
     color = GetPixel(hdc, 50, 50);
     ok(color == RGB(0, 0, 0), "Got unexpected color %#lx.\n", color);
     ok_sequence(WmEmptySeq, "DefWindowProc WM_PRINT with PRF_CHILDREN | PRF_CLIENT with an invisible child", FALSE);
+    flush_sequence();
+
+    DestroyWindow(child);
+
+    /* PRF_CHILDREN | PRF_CLIENT with a visible child window that has a non-client area */
+    child = CreateWindowA("WmPrintClass", "test_defwinproc_wm_print_child",
+                          WS_VISIBLE | WS_CHILD | WS_CAPTION, 50, 50, 50, 50, hwnd, 0, 0, NULL);
+    ok(!!child, "CreateWindowA failed, error %lu.\n", GetLastError());
+    flush_events();
+    flush_sequence();
+
+    PatBlt(hdc, 0, 0, 100, 100, BLACKNESS);
+    lr = DefWindowProcA(hwnd, WM_PRINT, (WPARAM)hdc, PRF_CHILDREN | PRF_CLIENT);
+    ok(lr == 1, "Got unexpected lr %Id.\n", lr);
+    color = GetPixel(hdc, 50, 50);
+    ok(color == RGB(255, 0, 0), "Got unexpected color %#lx.\n", color);
+    ok_sequence(wm_print_prf_children, "DefWindowProc WM_PRINT with PRF_CHILDREN | PRF_CLIENT for a WS_CAPTION child window", FALSE);
     flush_sequence();
 
     DeleteObject(bitmap);

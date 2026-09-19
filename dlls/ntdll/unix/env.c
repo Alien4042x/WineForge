@@ -69,6 +69,7 @@ WOW_PEB *wow_peb = NULL;
 USHORT *uctable = NULL, *lctable = NULL;
 SIZE_T startup_info_size = 0;
 BOOL is_prefix_bootstrap = FALSE;
+ULONG session_id = 0;
 
 static const WCHAR bootstrapW[] = {'W','I','N','E','B','O','O','T','S','T','R','A','P','M','O','D','E'};
 
@@ -1627,16 +1628,8 @@ static inline void put_unicode_string( WCHAR *src, WCHAR **dst, UNICODE_STRING *
     copy_unicode_string( &src, dst, str, wcslen(src) * sizeof(WCHAR) );
 }
 
-static void copy_dos_path_string( WCHAR **src, WCHAR **dst, UNICODE_STRING *str,
-                                  UNICODE_STRING *nt_str, UINT len )
+static void copy_dos_path_string( WCHAR **src, WCHAR **dst, UNICODE_STRING *str, UINT len )
 {
-    /* copy the original string into nt_str */
-    nt_str->Buffer = malloc( len + sizeof(WCHAR) );
-    memcpy( nt_str->Buffer, *src, len );
-    nt_str->Buffer[len / sizeof(WCHAR)] = 0;
-    nt_str->Length = len;
-    nt_str->MaximumLength = len + sizeof(WCHAR);
-
     if (len > 5 * sizeof(WCHAR) && (*src)[5] == ':') /* skip the \??\ prefix */
     {
         *src += 4;
@@ -1835,10 +1828,11 @@ static void *build_wow64_parameters( const RTL_USER_PROCESS_PARAMETERS *params )
 /*************************************************************************
  *		init_peb
  */
-static void init_peb( RTL_USER_PROCESS_PARAMETERS *params, void *module, BOOL debugged )
+static void init_peb( RTL_USER_PROCESS_PARAMETERS *params, BOOL debugged )
 {
-    peb->ImageBaseAddress           = module;
+    peb->ImageBaseAddress           = main_module;
     peb->ProcessParameters          = params;
+    peb->NumberOfProcessors         = cpu_count;
     peb->OSMajorVersion             = 10;
     peb->OSMinorVersion             = 0;
     peb->OSBuildNumber              = 19045;
@@ -1846,19 +1840,8 @@ static void init_peb( RTL_USER_PROCESS_PARAMETERS *params, void *module, BOOL de
     peb->ImageSubSystem             = main_image_info.SubSystemType;
     peb->ImageSubSystemMajorVersion = main_image_info.MajorSubsystemVersion;
     peb->ImageSubSystemMinorVersion = main_image_info.MinorSubsystemVersion;
+    peb->SessionId                  = session_id;
 
-#ifdef _WIN64
-    if (!is_machine_64bit( main_image_info.Machine ))
-    {
-        struct thread_data *data = get_thread_data();
-        data->teb->WowTebOffset = teb_offset;
-        data->teb->Tib.ExceptionList = (void *)((char *)data->teb + teb_offset);
-        wow_peb = (PEB32 *)((char *)peb + page_size);
-        set_thread_id( data );
-    }
-#endif
-
-    virtual_set_large_address_space();
     load_global_options( &params->ImagePathName, debugged );
 
     if (wow_peb)
@@ -1891,7 +1874,7 @@ static void init_peb( RTL_USER_PROCESS_PARAMETERS *params, void *module, BOOL de
  *
  * Build process parameters from scratch, for processes without a parent.
  */
-static RTL_USER_PROCESS_PARAMETERS *build_initial_params( void **module )
+static RTL_USER_PROCESS_PARAMETERS *build_initial_params(void)
 {
     static const WCHAR valueW[] = {'1',0};
     static const WCHAR pathW[] = {'P','A','T','H'};
@@ -1902,9 +1885,9 @@ static RTL_USER_PROCESS_PARAMETERS *build_initial_params( void **module )
     WCHAR *curdir = get_initial_directory();
     UNICODE_STRING nt_name;
     NTSTATUS status;
-    TEB64 *teb64 = get_teb64( NtCurrentTeb() );
+    struct thread_data *data = get_thread_data();
 
-    if (teb64) teb64->TlsSlots[WOW64_TLS_FILESYSREDIR] = TRUE;
+    data->filesys_redir = TRUE;
 
     /* store the initial PATH value */
     path = get_env_var( env, env_pos, pathW, 4 );
@@ -1926,7 +1909,7 @@ static RTL_USER_PROCESS_PARAMETERS *build_initial_params( void **module )
     env[env_pos++] = 0;
 
     get_full_path( main_argv[1], curdir, &nt_name );
-    status = load_main_exe( &nt_name, 0, module );
+    status = load_main_exe( &nt_name, 0 );
     /* fail only if the file contained an explicit path */
     if (status == STATUS_DLL_NOT_FOUND &&
         (strpbrk( main_argv[1], "/\\" ) || (main_argv[1][0] && main_argv[1][1] == ':')))
@@ -1952,15 +1935,17 @@ static RTL_USER_PROCESS_PARAMETERS *build_initial_params( void **module )
     {
         static const char *args[] = { "start.exe", "/exec" };
         free( nt_name.Buffer );
-        if (*module) NtUnmapViewOfSection( GetCurrentProcess(), *module );
-        load_start_exe( &nt_name, module );
+        if (main_module) NtUnmapViewOfSection( GetCurrentProcess(), main_module );
+        load_start_exe( &nt_name );
         prepend_argv( args, 2 );
     }
     else
     {
         rebuild_argv();
-        if (teb64) teb64->TlsSlots[WOW64_TLS_FILESYSREDIR] = FALSE;
+        data->filesys_redir = FALSE;
     }
+
+    virtual_alloc_first_teb();
 
     main_wargv = build_wargv( get_dos_path( nt_name.Buffer ));
     cmdline = build_command_line( main_wargv );
@@ -2014,7 +1999,6 @@ static RTL_USER_PROCESS_PARAMETERS *build_initial_params( void **module )
 void init_startup_info(void)
 {
     WCHAR *src, *dst, *env;
-    void *module = NULL;
     unsigned int status;
     SIZE_T size, info_size, env_size, env_pos;
     RTL_USER_PROCESS_PARAMETERS *params = NULL;
@@ -2025,8 +2009,8 @@ void init_startup_info(void)
 
     if (!startup_info_size)
     {
-        params = build_initial_params( &module );
-        init_peb( params, module, FALSE );
+        params = build_initial_params();
+        init_peb( params, FALSE );
         return;
     }
 
@@ -2051,10 +2035,21 @@ void init_startup_info(void)
     is_prefix_bootstrap = !!find_env_var( env, env_pos, bootstrapW, ARRAY_SIZE(bootstrapW) );
     env[env_pos++] = 0;
 
+    nt_name.Buffer = (WCHAR *)(info + 1);
+    nt_name.Length = info->imagepath_len;
+    status = load_main_exe( &nt_name, machine );
+    if (!NT_SUCCESS(status))
+    {
+        MESSAGE( "wine: failed to start %s: %x\n", debugstr_us(&nt_name), status );
+        NtTerminateProcess( GetCurrentProcess(), status );
+    }
+
+    virtual_alloc_first_teb();
+
     size = (sizeof(*params)
+            + info->imagepath_len + sizeof(WCHAR)
             + MAX_PATH * sizeof(WCHAR)  /* curdir */
             + info->dllpath_len + sizeof(WCHAR)
-            + info->imagepath_len + sizeof(WCHAR)
             + info->cmdline_len + sizeof(WCHAR)
             + info->title_len + sizeof(WCHAR)
             + info->desktop_len + sizeof(WCHAR)
@@ -2089,13 +2084,14 @@ void init_startup_info(void)
     src = (WCHAR *)(info + 1);
     dst = (WCHAR *)(params + 1);
 
+    copy_dos_path_string( &src, &dst, &params->ImagePathName, info->imagepath_len );
+
     /* curdir is special */
     copy_unicode_string( &src, &dst, &params->CurrentDirectory.DosPath, info->curdir_len );
+    dst += MAX_PATH - params->CurrentDirectory.DosPath.MaximumLength / sizeof(WCHAR);
     params->CurrentDirectory.DosPath.MaximumLength = MAX_PATH * sizeof(WCHAR);
-    dst = params->CurrentDirectory.DosPath.Buffer + MAX_PATH;
 
     if (info->dllpath_len) copy_unicode_string( &src, &dst, &params->DllPath, info->dllpath_len );
-    copy_dos_path_string( &src, &dst, &params->ImagePathName, &nt_name, info->imagepath_len );
     copy_unicode_string( &src, &dst, &params->CommandLine, info->cmdline_len );
     copy_unicode_string( &src, &dst, &params->WindowTitle, info->title_len );
     copy_unicode_string( &src, &dst, &params->Desktop, info->desktop_len );
@@ -2117,16 +2113,9 @@ void init_startup_info(void)
     free( env );
     free( info );
 
-    status = load_main_exe( &nt_name, machine, &module );
-    if (!NT_SUCCESS(status))
-    {
-        MESSAGE( "wine: failed to start %s: %x\n", debugstr_us(&params->ImagePathName), status );
-        NtTerminateProcess( GetCurrentProcess(), status );
-    }
     rebuild_argv();
     main_wargv = build_wargv( params->ImagePathName.Buffer );
-    free( nt_name.Buffer );
-    init_peb( params, module, debugged );
+    init_peb( params, debugged );
 }
 
 
@@ -2189,9 +2178,9 @@ void *create_startup_info( const UNICODE_STRING *nt_image, ULONG process_flags,
     info->process_group_id = params->ProcessGroupId;
 
     ptr = info + 1;
+    info->imagepath_len = append_string( &ptr, params, nt_image );
     info->curdir_len = append_string( &ptr, params, &params->CurrentDirectory.DosPath );
     info->dllpath_len = append_string( &ptr, params, &params->DllPath );
-    info->imagepath_len = append_string( &ptr, params, nt_image );
     info->cmdline_len = append_string( &ptr, params, &params->CommandLine );
     info->title_len = append_string( &ptr, params, &params->WindowTitle );
     info->desktop_len = append_string( &ptr, params, &params->Desktop );

@@ -53,7 +53,7 @@
             if ([view.superview isKindOfClass:NSClassFromString(@"WineContentView")] &&
                 [view.window    isKindOfClass:NSClassFromString(@"WineWindow")])
             {
-                void *client_surface = macdrv_get_view_d3dmetal_client_surface((macdrv_view)view.superview);
+                void *client_surface = macdrv_get_view_d3dmetal_client_surface((WineContentView *)view.superview);
                 if (client_surface)
                 {
                     macdrv_event* event;

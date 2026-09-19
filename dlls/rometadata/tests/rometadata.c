@@ -1,6 +1,7 @@
 /*
  * Copyright 2024 Zhiyi Zhang for CodeWeavers
  * Copyright 2025-2026 Vibhav Pant
+ * Copyright 2026 Vibhav Pant for CodeWeavers
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -876,6 +877,63 @@ static void test_token_(int line, IMetaDataImport *iface, mdToken token, CorToke
     valid = IMetaDataImport_IsValidToken(iface, token);
     todo_wine ok_(__FILE__, line)(valid, "got invalid token %s\n", debugstr_mdToken(token));
 }
+
+#define test_assemblyref(iface, ref) test_assemblyref_(__LINE__, iface, ref)
+static void test_assemblyref_(int line, IMetaDataImport *iface, mdAssemblyRef ref)
+{
+    static const BYTE mscorlib_token[] = { 0xb7, 0x7a, 0x5c, 0x56, 0x19, 0x34, 0xe0, 0x89 };
+    ULONG token_len = 0, name_reqd = 0, hash_len = 0, flags = 0, name_len;
+    const BYTE *token = NULL, *hash_blob = NULL;
+    IMetaDataAssemblyImport *asm_import;
+    ASSEMBLYMETADATA metadata = {0};
+    WCHAR *nameW;
+    HRESULT hr;
+
+    hr = IMetaDataImport_QueryInterface(iface, &IID_IMetaDataAssemblyImport, (void **)&asm_import);
+    todo_wine ok_(__FILE__, line)(hr == S_OK, "QueryInterface returned %#lx\n", hr);
+    if (!asm_import)
+    {
+        skip_(__FILE__, line)("QueryInterface failed\n");
+        return;
+    }
+
+    nameW = calloc(sizeof(WCHAR), 80);
+    hr = IMetaDataAssemblyImport_GetAssemblyRefProps(asm_import, ref, &token, &token_len, nameW, 80,
+                                                     &name_reqd, &metadata, &hash_blob, &hash_len, &flags);
+    todo_wine ok_(__FILE__, line)(hr == S_OK, "GetAssemblyRefProps returned %#lx\n", hr);
+
+    todo_wine ok_(__FILE__, line)(!!token, "got token %p\n", token);
+    if (RidFromToken(ref) == 1)
+    {
+        todo_wine ok_(__FILE__, line)(!wcscmp(nameW, L"mscorlib"), "got nameW %s\n", debugstr_w(nameW));
+        todo_wine ok_(__FILE__, line)(token_len == sizeof(mscorlib_token), "got token_len %lu\n",
+                                      token_len);
+        if (token_len == sizeof(mscorlib_token))
+            todo_wine ok_(__FILE__, line)(!memcmp(token, mscorlib_token, sizeof(mscorlib_token)),
+                                          "got unexpected token for msccorlib\n");
+    }
+    else
+        todo_wine ok_(__FILE__, line)(!token_len, "got token_len %lu != 0\n", token_len);
+
+        todo_wine ok_(__FILE__, line)(nameW[0], "got nameW %s\n", debugstr_w(nameW));
+    name_len = wcslen(nameW);
+    todo_wine ok_(__FILE__, line)(name_reqd && name_reqd == name_len + 1, "got name_reqd %lu\n", name_reqd);
+
+    todo_wine ok_(__FILE__, line)(metadata.usMajorVersion == 255, "got usMajorVersion %hu\n", metadata.usMajorVersion);
+    todo_wine ok_(__FILE__, line)(metadata.usMinorVersion == 255, "got usMinorVersion %hu\n", metadata.usMinorVersion);
+    todo_wine ok_(__FILE__, line)(metadata.usBuildNumber == 255, "got usBuildNumber %hu\n", metadata.usBuildNumber);
+    todo_wine ok_(__FILE__, line)(metadata.usRevisionNumber == 255, "got usRevisionNumber %hu\n", metadata.usRevisionNumber);
+    todo_wine ok_(__FILE__, line)(!metadata.szLocale , "got szLocale %s\n", debugstr_w(metadata.szLocale));
+    todo_wine ok_(__FILE__, line)(!metadata.cbLocale, "got cbLocale %lu\n", metadata.cbLocale);
+    todo_wine ok_(__FILE__, line)(!metadata.rProcessor, "got rProcessor %p\n", metadata.rProcessor);
+    todo_wine ok_(__FILE__, line)(!metadata.ulProcessor, "got ulProcessor %lu\n", metadata.ulProcessor);
+    todo_wine ok_(__FILE__, line)(!metadata.rOS, "got rOS %p\n", metadata.rOS);
+    todo_wine ok_(__FILE__, line)(!metadata.ulOS, "got ulOS %lu\n", metadata.ulOS);
+
+    free(nameW);
+    IMetaDataAssemblyImport_Release(asm_import);
+}
+
 struct method_props
 {
     const WCHAR *exp_name;
@@ -959,6 +1017,33 @@ static void test_prop_method_token_(int line, IMetaDataImport *md_import, mdType
     ok_(__FILE__, line)(!wcscmp(name, exp_name), "got name %s != %s\n", debugstr_w(name), debugstr_w(exp_name));
     ok_(__FILE__, line)(attrs == exp_attrs, "got attrs %#lx != %#x\n", attrs, exp_attrs);
     ok_(__FILE__, line)(!impl, "got impl %#lx\n", impl);
+}
+
+#define test_custom_attr_value(iface, type, blob, blob_len) test_custom_attr_value_(__LINE__, iface, type, blob, blob_len)
+static void test_custom_attr_value_(int line, IMetaDataImport *md_import, mdToken type, const BYTE *blob, ULONG blob_len)
+{
+    /* Partition II.23.3 */
+    static const BYTE prolog[] = { 1, 0 };
+
+    CorTokenType type_type = TypeFromToken(type);
+    const char *name = NULL;
+    HRESULT hr;
+
+    if (!blob)
+        ok_(__FILE__, line)(!blob_len, "got blob_len %lu != 0\n", blob_len);
+    else
+        ok_(__FILE__, line)(blob_len >= 2, "got blob_len %lu\n", blob_len);
+
+    ok_(__FILE__, line)(!IsNilToken(type) && (type_type == mdtMethodDef || type_type == mdtMemberRef), "got type %s\n",
+                        debugstr_mdToken(type));
+    hr = IMetaDataImport_GetNameFromToken(md_import, type, &name);
+    todo_wine ok_(__FILE__, line)(hr == S_OK, "got hr %#lx\n", hr);
+    todo_wine_if(FAILED(hr)) ok_(__FILE__, line)(name && !strcmp(name, ".ctor"), "got name %s\n", debugstr_a(name));
+
+    if (blob && blob_len >= 2)
+        ok_(__FILE__, line)(!memcmp(blob, prolog, ARRAY_SIZE(prolog)), "invalid CustomAttribute value prolog: {%#x, %#x}\n",
+                            blob[0], blob[1]);
+    /* TODO: Add tests for well-known WinRT custom attributes. */
 }
 
 static void test_IMetaDataImport(void)
@@ -1503,6 +1588,12 @@ static void test_IMetaDataImport(void)
         winetest_pop_context();
     }
 
+    hr = IMetaDataImport_EnumCustomAttributes(md_import, &henum, mdTokenNil, mdTokenNil, &token, 1, NULL);
+    ok(hr == S_FALSE, "got hr %#lx\n", hr);
+    hr = IMetaDataImport_EnumCustomAttributes(md_import, &henum, TokenFromRid(1, mdtCustomAttribute), mdTokenNil,
+                                              &token, 1, NULL);
+    ok(hr == S_FALSE, "got hr %#lx\n", hr);
+
     henum = NULL;
     buf_count = 0;
     hr = IMetaDataImport_EnumTypeDefs(md_import, &henum, &typedef1, 1, &buf_count);
@@ -1516,7 +1607,7 @@ static void test_IMetaDataImport(void)
         henum2 = NULL;
         winetest_push_context("i=%lu,typedef1=%s", i, debugstr_mdToken(typedef1));
         hr = IMetaDataImport_EnumCustomAttributes(md_import, &henum2, typedef1, mdTokenNil, &attr, 1, &buf_count2);
-        todo_wine ok(hr == S_OK, "got hr %#lx\n", hr);
+        ok(hr == S_OK, "got hr %#lx\n", hr);
         while (hr == S_OK && j < buf_count2)
         {
             mdToken obj = mdTokenNil, type = mdTokenNil;
@@ -1527,9 +1618,7 @@ static void test_IMetaDataImport(void)
             hr = IMetaDataImport_GetCustomAttributeProps(md_import, attr, &obj, &type, &blob, &blob_len);
             ok(hr == S_OK, "got hr %#lx\n", hr);
             ok(obj == typedef1, "got obj %s != %s\n", debugstr_mdToken(obj), debugstr_mdToken(typedef1));
-            ok(TypeFromToken(type) == mdtMemberRef || TypeFromToken(type) == mdtMethodDef, "got type %s\n", debugstr_mdToken(type));
-            ok(!!blob, "got blob %p\n", blob);
-            ok(!!blob_len, "got blob_len %lu\n", blob_len);
+            test_custom_attr_value(md_import, type, blob, blob_len);
             if (++j < buf_count2)
             {
                 hr = IMetaDataImport_EnumCustomAttributes(md_import, &henum2, typedef1, mdTokenNil, &attr, 1, NULL);
@@ -1553,23 +1642,78 @@ static void test_IMetaDataImport(void)
     henum = NULL;
     buf_count = 0;
     hr = IMetaDataImport_EnumInterfaceImpls(md_import, &henum, typedef1, &impl, 1, &buf_count);
-    todo_wine ok(hr == S_OK, "got hr %#lx\n", hr);
-    todo_wine ok(buf_count == 1, "got buf_count %lu\n", buf_count);
-    todo_wine test_token(md_import, impl, mdtInterfaceImpl, FALSE);
+    ok(hr == S_OK, "got hr %#lx\n", hr);
+    ok(buf_count == 1, "got buf_count %lu\n", buf_count);
+    test_token(md_import, impl, mdtInterfaceImpl, FALSE);
     IMetaDataImport_CloseEnum(md_import, henum);
 
     token = typedef2 = mdTokenNil;
     hr = IMetaDataImport_GetInterfaceImplProps(md_import, impl, &typedef2, &token);
-    todo_wine ok(hr == S_OK, "got hr %#lx\n", hr);
-    todo_wine test_token(md_import, typedef2, mdtTypeDef, FALSE);
-    todo_wine test_token(md_import, token, mdtTypeRef, FALSE);
-    todo_wine ok(typedef2 == typedef1, "got typedef2 %s != %s\n", debugstr_mdToken(typedef2), debugstr_mdToken(typedef1));
+    ok(hr == S_OK, "got hr %#lx\n", hr);
+    test_token(md_import, typedef2, mdtTypeDef, FALSE);
+    test_token(md_import, token, mdtTypeRef, FALSE);
+    ok(typedef2 == typedef1, "got typedef2 %s != %s\n", debugstr_mdToken(typedef2), debugstr_mdToken(typedef1));
+
+    hr = IMetaDataImport_FindTypeRef(md_import, TokenFromRid(1, mdtAssemblyRef), L"NonExistent.Type.Name", &typeref);
+    ok(hr == CLDB_E_RECORD_NOTFOUND, "got hr %#lx\n", hr);
+    hr = IMetaDataImport_FindTypeRef(md_import, mdTokenNil, L"Wine.Test.ITest3", &typeref);
+    ok(hr == CLDB_E_RECORD_NOTFOUND, "got hr %#lx\n", hr);
+    hr = IMetaDataImport_FindTypeRef(md_import, TokenFromRid(1, mdtTypeDef), L"Wine.Test.ITest3", &typeref);
+    ok(hr == CLDB_E_RECORD_NOTFOUND, "got hr %#lx\n", hr);
 
     hr = IMetaDataImport_FindTypeRef(md_import, mdtModule | 1, L"Wine.Test.ITest3", &typeref);
-    todo_wine ok(hr == S_OK, "got hr %#lx\n", hr);
-    todo_wine test_token(md_import, typeref, mdtTypeRef, FALSE);
-    todo_wine_if(token != mdTokenNil)
+    ok(hr == S_OK, "got hr %#lx\n", hr);
+    test_token(md_import, typeref, mdtTypeRef, FALSE);
     ok(token == typeref, "got token %s != %s\n", debugstr_mdToken(token), debugstr_mdToken(typeref));
+
+    henum = NULL;
+    typeref = mdTokenNil;
+    hr = IMetaDataImport_EnumTypeRefs(md_import, &henum, &typeref, 1, NULL);
+    ok(hr == S_OK, "got hr %#lx\n", hr);
+    buf_count = 0;
+    hr = IMetaDataImport_CountEnum(md_import, henum, &buf_count);
+    ok(hr == S_OK, "got hr %#lx\n", hr);
+    ok(buf_count, "got buf_count %lu\n", hr);
+
+    for (i = 0; i < buf_count && hr == S_OK; i++)
+    {
+        mdTypeRef typeref2 = mdTokenNil;
+        CorTokenType scope_type;
+        ULONG written, len;
+        mdToken scope;
+        WCHAR name[80];
+
+        winetest_push_context("i=%lu,typeref=%s", i, debugstr_mdToken(typeref));
+        test_token(md_import, typeref, mdtTypeRef, FALSE);
+
+        name[0] = L'\0';
+        scope = mdTokenNil;
+        hr = IMetaDataImport_GetTypeRefProps(md_import, typeref, &scope, name, ARRAY_SIZE(name), &written);
+        ok(hr == S_OK, "got hr %#lx\n", hr);
+
+        ok(name[0], "got name %s\n", debugstr_w(name));
+        len = wcslen(name);
+        ok(written == len + 1, "got written %lu != %lu\n", written, len + 1);
+
+        scope_type = TypeFromToken(scope);
+        if (scope_type == mdtModule)
+            ok(RidFromToken(scope) == 1, "got scope %s\n", debugstr_mdToken(scope));
+        else
+        {
+            test_token(md_import, scope, mdtAssemblyRef, FALSE);
+            test_assemblyref(md_import, scope);
+        }
+
+        hr = IMetaDataImport_FindTypeRef(md_import, scope, name, &typeref2);
+        ok(hr == S_OK, "got hr %#lx\n", hr);
+        ok(typeref == typeref2, "got hr %#lx\n", hr);
+
+        hr = IMetaDataImport_EnumTypeRefs(md_import, &henum, &typeref, 1, NULL);
+        ok(SUCCEEDED(hr), "got hr %#lx\n", hr);
+        winetest_pop_context();
+    }
+    ok(i == buf_count, "got i %lu != %lu\n", i, buf_count);
+    IMetaDataImport_CloseEnum(md_import, henum);
 
     IMetaDataImport_Release(md_import);
 }
@@ -1614,13 +1758,26 @@ static ULONG decode_int(int line, const BYTE *encoded, ULONG *len)
     return ((encoded[0] & ~0xe0) << 24) + (encoded[1] << 16) + (encoded[2] << 8) + encoded[3];
 }
 
+struct generic_param_props
+{
+    ULONG exp_seq;
+    const WCHAR *exp_name;
+};
+
 /* Tests for WinRT metadata shipped with Windows. */
 static void test_IMetaDataImport_winrt(void)
 {
     static const BYTE keyvaluepair_tmpl_params[] = { 2, ELEMENT_TYPE_STRING, ELEMENT_TYPE_OBJECT };
     static const WCHAR *foundation_path = L"c:\\windows\\system32\\winmetadata\\windows.foundation.winmd";
+    static const struct generic_param_props ikeyvaluepair_generic_params[] =
+    {
+        { 0, L"K" },
+        { 1, L"V" },
+    };
 
+    mdGenericParam params[2] = {0, 0};
     IMetaDataDispenser *dispenser;
+    IMetaDataImport2 *md_import2;
     IMetaDataImport *md_import;
     HCORENUM henum = NULL;
     mdInterfaceImpl impl;
@@ -1656,6 +1813,9 @@ static void test_IMetaDataImport_winrt(void)
         skip("OpenScope failed\n");
         return;
     }
+
+    hr = IMetaDataImport_QueryInterface(md_import, &IID_IMetaDataImport2, (void **)&md_import2);
+    ok(hr == S_OK, "got hr %#lx\n", hr);
 
     /* Get the typeref for IKeyValuePair`2 and append it. */
     hr = IMetaDataImport_FindTypeRef(md_import, mdtModule | 1, L"Windows.Foundation.Collections.IKeyValuePair`2", &kvpair_ref);
@@ -1736,6 +1896,40 @@ static void test_IMetaDataImport_winrt(void)
     for (i = 0; i < ARRAY_SIZE(propertyset_ifaces); i++)
         ok(propertyset_ifaces[i].found, "Extends entry for %s not found\n", debugstr_w(propertyset_ifaces[i].name));
 
+    type_def = mdTokenNil;
+    hr = IMetaDataImport_FindTypeDefByName(md_import, L"Windows.Foundation.Collections.IKeyValuePair`2", mdTokenNil, &type_def);
+    ok(hr == S_OK, "got hr %#lx\n", hr);
+
+    henum = NULL;
+    hr = IMetaDataImport2_EnumGenericParams(md_import2, &henum, type_def, params, ARRAY_SIZE(params), NULL);
+    todo_wine ok(hr == S_OK, "got hr %#lx\n", hr);
+    hr = IMetaDataImport2_CountEnum(md_import2, henum, &len);
+    ok(hr == S_OK, "got hr %#lx\n", hr);
+    todo_wine ok(len == ARRAY_SIZE(ikeyvaluepair_generic_params), "got len %lu\n", len);
+
+    for (i = 0; i < ARRAY_SIZE(ikeyvaluepair_generic_params); i++)
+    {
+        const struct generic_param_props *props = &ikeyvaluepair_generic_params[i];
+        ULONG seq = 0, flags = 0, reserved = 0xdeadbeef;
+        mdToken parent = mdTokenNil;
+        WCHAR nameW[80];
+
+        winetest_push_context("i=%lu,param=%s", i, debugstr_mdToken(params[i]));
+
+        nameW[0] = L'\0';
+        hr = IMetaDataImport2_GetGenericParamProps(md_import2, params[i], &seq, &flags, &parent, &reserved, nameW,
+                                                   ARRAY_SIZE(nameW), NULL);
+        todo_wine ok(hr == S_OK, "got hr %#lx\n", hr);
+        todo_wine ok(seq == props->exp_seq, "got seq %lu != %lu\n", seq, props->exp_seq);
+        todo_wine ok(!flags, "got flags %#lx\n", flags);
+        todo_wine ok(parent == type_def, "got parent %s != %s\n", debugstr_mdToken(parent), debugstr_mdToken(type_def));
+        todo_wine ok(reserved == 0xdeadbeef, "got reserved %#lx\n", reserved);
+        todo_wine ok(!wcscmp(nameW, props->exp_name), "got nameW %s != %s\n", debugstr_w(nameW), debugstr_w(props->exp_name));
+
+        winetest_pop_context();
+    }
+
+    IMetaDataImport2_Release(md_import2);
     IMetaDataImport_Release(md_import);
 }
 

@@ -329,25 +329,24 @@ void x11drv_xinput2_enable( Display *display, Window window )
 
     if (!xinput2_available) return;
 
+    if (window == DefaultRootWindow( display ))
+    {
+        struct x11drv_thread_data *data = x11drv_thread_data();
+        TRACE( "Incrementing root_window_users to %d\n", data->root_window_users + 1 );
+        if (data->root_window_users++) return;
+        XISetMask( data->root_mask, XI_RawMotion );
+        pXISelectEvents( data->display, DefaultRootWindow( data->display ), &data->root_events, 1 );
+        return;
+    }
+
     mask.mask     = mask_bits;
     mask.mask_len = sizeof(mask_bits);
     mask.deviceid = XIAllMasterDevices;
     memset( mask_bits, 0, sizeof(mask_bits) );
 
-    if (window == DefaultRootWindow( display ))
-    {
-        if (x11drv_thread_data()->root_window_users++) return;
-        XISetMask( mask_bits, XI_DeviceChanged );
-        XISetMask( mask_bits, XI_RawMotion );
-        XISetMask( mask_bits, XI_RawButtonPress );
-        XISetMask( mask_bits, XI_RawButtonRelease );
-    }
-    else
-    {
-        XISetMask( mask_bits, XI_TouchBegin );
-        XISetMask( mask_bits, XI_TouchUpdate );
-        XISetMask( mask_bits, XI_TouchEnd );
-    }
+    XISetMask( mask_bits, XI_TouchBegin );
+    XISetMask( mask_bits, XI_TouchUpdate );
+    XISetMask( mask_bits, XI_TouchEnd );
 
     pXISelectEvents( display, window, &mask, 1 );
 }
@@ -363,16 +362,20 @@ void x11drv_xinput2_disable( Display *display, Window window )
 
     if (!xinput2_available) return;
 
+    if (window == DefaultRootWindow( display ))
+    {
+        struct x11drv_thread_data *data = x11drv_thread_data();
+        TRACE( "Decrementing root_window_users to %d\n", data->root_window_users - 1 );
+        if (--data->root_window_users) return;
+        XIClearMask( data->root_mask, XI_RawMotion );
+        pXISelectEvents( data->display, DefaultRootWindow( data->display ), &data->root_events, 1 );
+        return;
+    }
+
     mask.mask     = mask_bits;
     mask.mask_len = sizeof(mask_bits);
     mask.deviceid = XIAllMasterDevices;
     memset( mask_bits, 0, sizeof(mask_bits) );
-
-    if (window == DefaultRootWindow( display ))
-    {
-        if (--x11drv_thread_data()->root_window_users) return;
-        XISetMask( mask_bits, XI_DeviceChanged );
-    }
 
     pXISelectEvents( display, window, &mask, 1 );
 }
@@ -383,9 +386,7 @@ void x11drv_xinput2_disable( Display *display, Window window )
  */
 void x11drv_xinput2_init( struct x11drv_thread_data *data )
 {
-    unsigned char mask_bits[XIMaskLen(XI_LASTEVENT)];
     int major = 2, minor = 2;
-    XIEventMask mask;
     int count;
 
     if (!xinput2_available || pXIQueryVersion( data->display, &major, &minor ))
@@ -395,12 +396,12 @@ void x11drv_xinput2_init( struct x11drv_thread_data *data )
         return;
     }
 
-    mask.mask     = mask_bits;
-    mask.mask_len = sizeof(mask_bits);
-    mask.deviceid = XIAllMasterDevices;
-    memset( mask_bits, 0, sizeof(mask_bits) );
-    XISetMask( mask_bits, XI_DeviceChanged );
-    pXISelectEvents( data->display, DefaultRootWindow( data->display ), &mask, 1 );
+    data->root_events.deviceid = XIAllMasterDevices;
+    data->root_events.mask_len = sizeof(data->root_mask);
+    data->root_events.mask = data->root_mask;
+
+    XISetMask( data->root_mask, XI_DeviceChanged );
+    pXISelectEvents( data->display, DefaultRootWindow( data->display ), &data->root_events, 1 );
 
     if (!pXIGetClientPointer( data->display, None, &data->xinput2_pointer ))
         WARN( "Failed to get xinput2 master pointer device\n" );
@@ -467,6 +468,12 @@ static BOOL grab_clipping_window( const RECT *clip )
         return TRUE;
     }
 
+    if (!data->clipping_cursor)
+    {
+        XISetMask( data->root_mask, XI_ButtonPress );
+        pXISelectEvents( data->display, DefaultRootWindow( data->display ), &data->root_events, 1 );
+    }
+
     TRACE( "clipping to %s win %lx\n", wine_dbgstr_rect(clip), clip_window );
 
     if (!data->clipping_cursor) XUnmapWindow( data->display, clip_window );
@@ -523,6 +530,11 @@ void ungrab_clipping_window(void)
     if (clipping_cursor) XUngrabPointer( data->display, CurrentTime );
     clipping_cursor = FALSE;
     data->clipping_cursor = FALSE;
+
+#ifdef HAVE_X11_EXTENSIONS_XINPUT2_H
+    XIClearMask( data->root_mask, XI_ButtonPress );
+    pXISelectEvents( data->display, DefaultRootWindow( data->display ), &data->root_events, 1 );
+#endif
 }
 
 /***********************************************************************
@@ -1562,7 +1574,6 @@ BOOL X11DRV_ButtonPress( HWND hwnd, XEvent *xev )
     POINT pt = { event->x, event->y }, root = { event->x_root, event->y_root };
     struct x11drv_win_data *data;
 
-    if (x11drv_thread_data()->root_window_users) return FALSE;
     if (button >= NB_BUTTONS) return FALSE;
     flags = button_down_flags[button];
 
@@ -1589,7 +1600,6 @@ BOOL X11DRV_ButtonRelease( HWND hwnd, XEvent *xev )
     UINT button = event->button - 1, flags, time = EVENT_x11_time_to_win32_time( event->time );
     POINT pt = { event->x, event->y }, root = { event->x_root, event->y_root };
 
-    if (x11drv_thread_data()->root_window_users) return FALSE;
     if (button >= NB_BUTTONS || !(flags = button_up_flags[button])) return FALSE;
 
     TRACE( "hwnd %p/%lx button %u pos %s\n", hwnd, event->window, button, wine_dbgstr_point( &pt ) );

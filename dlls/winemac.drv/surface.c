@@ -46,7 +46,7 @@ static inline int get_dib_image_size(const BITMAPINFO *info)
 struct macdrv_window_surface
 {
     struct window_surface   header;
-    macdrv_window           window;
+    WineWindow             *window;
     CGDataProviderRef       provider;
 };
 
@@ -150,9 +150,10 @@ static void macdrv_surface_destroy(struct window_surface *window_surface)
 
 static const struct window_surface_funcs macdrv_surface_funcs =
 {
-    macdrv_surface_set_clip,
-    macdrv_surface_flush,
-    macdrv_surface_destroy,
+    .size = sizeof(struct macdrv_window_surface),
+    .set_clip = macdrv_surface_set_clip,
+    .flush = macdrv_surface_flush,
+    .destroy = macdrv_surface_destroy,
 };
 
 static struct macdrv_window_surface *get_mac_surface(struct window_surface *surface)
@@ -164,7 +165,7 @@ static struct macdrv_window_surface *get_mac_surface(struct window_surface *surf
 /***********************************************************************
  *              create_surface
  */
-static struct window_surface *create_surface(HWND hwnd, macdrv_window window, const RECT *rect)
+static struct window_surface *create_surface(HWND hwnd, WineWindow *window, const RECT *rect)
 {
     struct macdrv_window_surface *surface;
     int width = rect->right - rect->left, height = rect->bottom - rect->top;
@@ -206,7 +207,7 @@ static struct window_surface *create_surface(HWND hwnd, macdrv_window window, co
     }
     if (desc.hDeviceDc) NtUserReleaseDC(hwnd, desc.hDeviceDc);
 
-    if (!(window_surface = window_surface_create(sizeof(*surface), &macdrv_surface_funcs, hwnd, rect, info, bitmap)))
+    if (!(window_surface = window_surface_create(&macdrv_surface_funcs, hwnd, rect, info, bitmap)))
     {
         if (bitmap) NtGdiDeleteObjectApp(bitmap);
         CGDataProviderRelease(provider);

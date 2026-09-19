@@ -103,9 +103,9 @@ enum macdrv_window_messages
 
 struct macdrv_thread_data
 {
-    macdrv_event_queue          queue;
+    WineEventQueue             *queue;
     const macdrv_event         *current_event;
-    macdrv_window               capture_window;
+    WineWindow                 *capture_window;
     CFDataRef                   keyboard_layout_uchr;
     CGEventSourceKeyboardType   keyboard_type;
     bool                        iso_keyboard;
@@ -181,8 +181,8 @@ extern void macdrv_ThreadDetach(void);
 struct macdrv_win_data
 {
     HWND                hwnd;                   /* hwnd that this private data belongs to */
-    macdrv_window       cocoa_window;
-    macdrv_view         client_view;
+    WineWindow         *cocoa_window;
+    WineContentView    *client_view;
     struct window_rects rects;                  /* window rects in monitor DPI, relative to parent client area */
     int                 pixel_format;           /* pixel format for GL */
     HANDLE              drag_event;             /* event to signal that Cocoa-driven window dragging has ended */
@@ -201,8 +201,8 @@ struct macdrv_win_data
 struct macdrv_client_surface
 {
     struct client_surface   client;
-    macdrv_view             cocoa_view;
-    macdrv_metal_swapchain  metal_swapchain;
+    WineContentView        *cocoa_view;
+    id_WineMetalSwapChain   metal_swapchain;
 };
 
 extern struct macdrv_client_surface *impl_from_client_surface(struct client_surface *client);
@@ -211,7 +211,7 @@ extern BOOL macdrv_client_surface_acquire_metal_swapchain(struct macdrv_client_s
 extern struct macdrv_win_data *get_win_data(HWND hwnd);
 extern void release_win_data(struct macdrv_win_data *data);
 extern void init_win_context(void);
-extern macdrv_window macdrv_get_cocoa_window(HWND hwnd, BOOL require_on_screen);
+extern WineWindow *macdrv_get_cocoa_window(HWND hwnd, BOOL require_on_screen);
 extern RGNDATA *get_region_data(HRGN hrgn, HDC hdc_lptodp);
 extern void activate_on_following_focus(void);
 

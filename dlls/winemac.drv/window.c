@@ -251,10 +251,10 @@ void release_win_data(struct macdrv_win_data *data)
  *
  * Return the Mac window associated with the full area of a window
  */
-macdrv_window macdrv_get_cocoa_window(HWND hwnd, BOOL require_on_screen)
+WineWindow *macdrv_get_cocoa_window(HWND hwnd, BOOL require_on_screen)
 {
     struct macdrv_win_data *data = get_win_data(hwnd);
-    macdrv_window ret = NULL;
+    WineWindow *ret = NULL;
     if (data && (data->on_screen || !require_on_screen))
         ret = data->cocoa_window;
     release_win_data(data);
@@ -272,7 +272,7 @@ static void set_cocoa_window_properties(struct macdrv_win_data *data)
 {
     DWORD style, ex_style;
     HWND owner;
-    macdrv_window owner_win;
+    WineWindow *owner_win;
     struct macdrv_window_features wf;
     struct macdrv_window_state state;
 
@@ -660,8 +660,8 @@ static void show_window(struct macdrv_win_data *data)
 {
     HWND prev = NULL;
     HWND next = NULL;
-    macdrv_window prev_window = NULL;
-    macdrv_window next_window = NULL;
+    WineWindow *prev_window = NULL;
+    WineWindow *next_window = NULL;
     BOOL activate = FALSE;
     GUITHREADINFO info;
 
@@ -1144,7 +1144,7 @@ static void epic_update_unreal_client_view_frame(HWND hwnd, struct macdrv_win_da
 static void macdrv_client_surface_update(struct client_surface *client)
 {
     struct macdrv_client_surface *surface = impl_from_client_surface(client);
-    HWND hwnd = client->hwnd, toplevel = NtUserGetAncestor(hwnd, GA_ROOT);
+    HWND hwnd = client->hwnd, toplevel = client->toplevel;
     struct macdrv_win_data *data;
 
     TRACE("%s\n", debugstr_client_surface(client));
@@ -1281,6 +1281,7 @@ static void macdrv_client_surface_present(struct client_surface *client, HDC hdc
 
 static const struct client_surface_funcs macdrv_client_surface_funcs =
 {
+    .size = sizeof(struct macdrv_client_surface),
     .destroy = macdrv_client_surface_destroy,
     .detach = macdrv_client_surface_detach,
     .update = macdrv_client_surface_update,
@@ -1297,7 +1298,7 @@ struct client_surface *macdrv_CreateClientSurface(HWND hwnd, int pixel_format, B
 {
     struct macdrv_client_surface *surface;
 
-    surface = client_surface_create(sizeof(*surface), &macdrv_client_surface_funcs, hwnd, pixel_format, raw);
+    surface = client_surface_create(&macdrv_client_surface_funcs, hwnd, pixel_format, raw);
     surface->cocoa_view = macdrv_create_view(cgrect_from_rect(surface->client.monitor_rect));
     macdrv_set_view_hidden(surface->cocoa_view, TRUE);
 
@@ -1571,7 +1572,7 @@ void macdrv_SetWindowStyle(HWND hwnd, INT offset, STYLESTRUCT *style)
  */
 void macdrv_SetWindowText(HWND hwnd, LPCWSTR text)
 {
-    macdrv_window win;
+    WineWindow *win;
 
     TRACE("%p, %s\n", hwnd, debugstr_w(text));
 

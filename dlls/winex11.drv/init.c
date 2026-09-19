@@ -410,6 +410,7 @@ static void X11DRV_client_surface_present( struct client_surface *client, HDC hd
 
 static const struct client_surface_funcs x11drv_client_surface_funcs =
 {
+    .size = sizeof(struct x11drv_client_surface),
     .destroy = x11drv_client_surface_destroy,
     .detach = x11drv_client_surface_detach,
     .update = x11drv_client_surface_update,
@@ -440,7 +441,7 @@ struct client_surface *X11DRV_CreateClientSurface( HWND hwnd, int format, BOOL r
     else colormap = XCreateColormap( gdi_display, get_dummy_parent(), visual.visual, visual_class_alloc( visual.class ) );
     if (!colormap) return NULL;
 
-    if (!(surface = client_surface_create( sizeof(*surface), &x11drv_client_surface_funcs, hwnd, format, raw ))) goto failed;
+    if (!(surface = client_surface_create( &x11drv_client_surface_funcs, hwnd, format, raw ))) goto failed;
     surface->colormap = colormap;
     rect = raw ? surface->client.monitor_rect : surface->client.virtual_rect;
     if (!(surface->window = create_client_window( hwnd, rect, &visual, colormap ))) goto failed;
@@ -583,6 +584,7 @@ static const struct user_driver_funcs x11drv_funcs =
     .dc_funcs.pExtFloodFill = X11DRV_ExtFloodFill,
     .dc_funcs.pFillPath = X11DRV_FillPath,
     .dc_funcs.pGetDeviceCaps = X11DRV_GetDeviceCaps,
+    .dc_funcs.pGetDeviceGammaRamp = X11DRV_GetDeviceGammaRamp,
     .dc_funcs.pGetImage = X11DRV_GetImage,
     .dc_funcs.pGetNearestColor = X11DRV_GetNearestColor,
     .dc_funcs.pGetSystemPaletteEntries = X11DRV_GetSystemPaletteEntries,
@@ -605,6 +607,7 @@ static const struct user_driver_funcs x11drv_funcs =
     .dc_funcs.pSetDCBrushColor = X11DRV_SetDCBrushColor,
     .dc_funcs.pSetDCPenColor = X11DRV_SetDCPenColor,
     .dc_funcs.pSetDeviceClipping = X11DRV_SetDeviceClipping,
+    .dc_funcs.pSetDeviceGammaRamp = X11DRV_SetDeviceGammaRamp,
     .dc_funcs.pSetPixel = X11DRV_SetPixel,
     .dc_funcs.pStretchBlt = X11DRV_StretchBlt,
     .dc_funcs.pStrokeAndFillPath = X11DRV_StrokeAndFillPath,
