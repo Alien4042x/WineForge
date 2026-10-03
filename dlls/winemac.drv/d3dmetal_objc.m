@@ -22,11 +22,13 @@
 
 #include "config.h"
 
+/* WineForge-Internal: d3dmetal-objc-winemac-headers-v1. */
+#include "macdrv.h"
+
 #import <AppKit/AppKit.h>
 #import <QuartzCore/QuartzCore.h>
 #import <objc/runtime.h>
 
-#include "macdrv_cocoa.h"
 #import "cocoa_app.h"
 #import "cocoa_event.h"
 #import "cocoa_window.h"

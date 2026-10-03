@@ -42,9 +42,9 @@ struct macdrv_functions_t
     struct d3dmetal_macdrv_win_data* (*get_win_data)(HWND hwnd);
     void (*release_win_data)(struct d3dmetal_macdrv_win_data *data);
     WineWindow *(*macdrv_get_cocoa_window)(HWND hwnd, BOOL require_on_screen);
-    id_MTLDevice (*macdrv_create_metal_device)(void);
-    void (*macdrv_release_metal_device)(id_MTLDevice device);
-    WineMetalView *(*macdrv_view_create_metal_view)(WineContentView *view, id_MTLDevice device);
+    MTLDevice_id (*macdrv_create_metal_device)(void);
+    void (*macdrv_release_metal_device)(MTLDevice_id device);
+    WineMetalView *(*macdrv_view_create_metal_view)(WineContentView *view, MTLDevice_id device);
     CAMetalLayer *(*macdrv_view_get_metal_layer)(WineMetalView *view);
     void (*macdrv_view_release_metal_view)(WineMetalView *view);
     void (*on_main_thread)(dispatch_block_t b);
@@ -171,19 +171,19 @@ static WineWindow *my_macdrv_get_cocoa_window(HWND hwnd, BOOL require_on_screen)
     return macdrv_get_cocoa_window(hwnd, require_on_screen);
 }
 
-static id_MTLDevice my_macdrv_create_metal_device(void)
+static MTLDevice_id my_macdrv_create_metal_device(void)
 {
     TRACE("macdrv_create_metal_device\n");
     return macdrv_create_metal_device();
 }
 
-static void my_macdrv_release_metal_device(id_MTLDevice device)
+static void my_macdrv_release_metal_device(MTLDevice_id device)
 {
     TRACE("macdrv_release_metal_device %p\n", device);
     macdrv_release_metal_device(device);
 }
 
-static WineMetalView *my_macdrv_view_create_metal_view(WineContentView *view, id_MTLDevice device)
+static WineMetalView *my_macdrv_view_create_metal_view(WineContentView *view, MTLDevice_id device)
 {
     TRACE("macdrv_view_create_metal_view %p %p\n", view, device);
     return macdrv_view_create_metal_view(view, device);
@@ -308,7 +308,8 @@ static LSTATUS WINAPI my_RegCreateKeyExA(HKEY p1, LPCSTR p2, DWORD p3, LPSTR p4,
     return result;
 }
 
-static LSTATUS WINAPI DECLSPEC_HOTPATCH RegCloseKey( HKEY hkey )
+/* WineForge-Internal: d3dmetal-local-registry-close-v1. */
+static LSTATUS WINAPI DECLSPEC_HOTPATCH d3dmetal_reg_close_key( HKEY hkey )
 {
     if (!hkey) return ERROR_INVALID_HANDLE;
     if (hkey >= (HKEY)0x80000000) return ERROR_SUCCESS;
@@ -318,7 +319,7 @@ static LSTATUS WINAPI DECLSPEC_HOTPATCH RegCloseKey( HKEY hkey )
 static LSTATUS WINAPI my_RegCloseKey(HKEY hkey)
 {
     TRACE("RegCloseKey %p\n", hkey);
-    return RegCloseKey(hkey);
+    return d3dmetal_reg_close_key(hkey);
 }
 
 static BOOL WINAPI my_EnumDisplayMonitors(HDC h, LPRECT p2, MONITORENUMPROC p3, LPARAM p4)
