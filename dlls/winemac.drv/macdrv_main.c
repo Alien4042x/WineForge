@@ -50,6 +50,7 @@ bool allow_immovable_windows = true;
 bool use_confinement_cursor_clipping = true;
 bool cursor_clipping_locks_windows = true;
 bool use_precise_scrolling = true;
+bool use_gcmouse = true;
 int gl_surface_mode = GL_SURFACE_IN_FRONT_OPAQUE;
 bool retina_enabled = false;
 bool enable_app_nap = false;
@@ -349,6 +350,9 @@ static void setup_options(void)
     if (!get_config_key(hkey, appkey, "UsePreciseScrolling", buffer, sizeof(buffer)))
         use_precise_scrolling = IS_OPTION_TRUE(buffer[0]);
 
+    if (!get_config_key(hkey, appkey, "UseGCMouse", buffer, sizeof(buffer)))
+        use_gcmouse = IS_OPTION_TRUE(buffer[0]);
+
     if (!get_config_key(hkey, appkey, "OpenGLSurfaceMode", buffer, sizeof(buffer)))
     {
         static const WCHAR transparentW[] = {'t','r','a','n','s','p','a','r','e','n','t',0};
@@ -443,6 +447,7 @@ static NTSTATUS macdrv_init(void *arg)
         return STATUS_UNSUCCESSFUL;
     }
 
+    macdrv_start_gcmouse_input();
     init_user_driver();
     return STATUS_SUCCESS;
 }

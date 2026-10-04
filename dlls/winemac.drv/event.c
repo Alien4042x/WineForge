@@ -48,6 +48,7 @@ static const char *dbgstr_event(int type)
         "MOUSE_BUTTON",
         "MOUSE_MOVED_RELATIVE",
         "MOUSE_MOVED_ABSOLUTE",
+        "MOUSE_MOVED_RAW",
         "MOUSE_SCROLL",
         "QUERY_EVENT",
         "QUERY_EVENT_NO_PREEMPT_WAIT",
@@ -105,6 +106,7 @@ static macdrv_event_mask get_event_mask(DWORD mask)
     {
         event_mask |= event_mask_for_type(MOUSE_MOVED_RELATIVE);
         event_mask |= event_mask_for_type(MOUSE_MOVED_ABSOLUTE);
+        event_mask |= event_mask_for_type(MOUSE_MOVED_RAW);
     }
 
     if (mask & QS_POSTMESSAGE)
@@ -354,6 +356,7 @@ void macdrv_handle_event(const macdrv_event *event)
         break;
     case MOUSE_MOVED_RELATIVE:
     case MOUSE_MOVED_ABSOLUTE:
+    case MOUSE_MOVED_RAW:
         macdrv_mouse_moved(hwnd, event);
         break;
     case MOUSE_SCROLL:

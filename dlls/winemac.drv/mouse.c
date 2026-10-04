@@ -136,7 +136,8 @@ static void send_mouse_input(HWND hwnd, WineWindow *cocoa_window, UINT flags, in
     input.mi.time           = time;
     input.mi.dwExtraInfo    = 0;
 
-    NtUserSendHardwareInput(hwnd, 0, &input, 0);
+    /* GCMouse provides WM_INPUT movement; keep NSEvents for legacy cursor updates without duplicating it. */
+    NtUserSendHardwareInput(hwnd, macdrv_gcmouse_input_active() ? SEND_HWMSG_RAWINPUT : 0, &input, 0);
 }
 
 
@@ -874,11 +875,29 @@ void macdrv_mouse_button(HWND hwnd, const macdrv_event *event)
 /***********************************************************************
  *              macdrv_mouse_moved
  *
- * Handler for MOUSE_MOVED_RELATIVE and MOUSE_MOVED_ABSOLUTE events.
+ * Handler for mouse movement events.
  */
 void macdrv_mouse_moved(HWND hwnd, const macdrv_event *event)
 {
     UINT flags = MOUSEEVENTF_MOVE;
+
+    if (event->type == MOUSE_MOVED_RAW)
+    {
+        struct raw_mouse raw = { .count = 1 };
+        INPUT input = { .type = INPUT_MOUSE };
+
+        raw.data[0].x = event->mouse_moved.x;
+        raw.data[0].y = event->mouse_moved.y;
+        input.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_MOVE_NOCOALESCE;
+        input.mi.time = event->mouse_moved.time_ms;
+
+        TRACE("win %p/%p raw (%d,%d) time %lu (%lu ticks ago)\n", hwnd, event->window,
+              event->mouse_moved.x, event->mouse_moved.y, event->mouse_moved.time_ms,
+              (NtGetTickCount() - event->mouse_moved.time_ms));
+
+        NtUserSendHardwareInput(hwnd, SEND_HWMSG_RAWINPUT, &input, (LPARAM)&raw);
+        return;
+    }
 
     TRACE("win %p/%p %s (%d,%d) drag %d time %lu (%lu ticks ago)\n", hwnd, event->window,
           (event->type == MOUSE_MOVED_RELATIVE) ? "relative" : "absolute",
