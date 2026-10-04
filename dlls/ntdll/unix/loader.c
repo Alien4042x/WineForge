@@ -292,6 +292,10 @@ static WORD get_alt_machine( WORD machine )
     }
 }
 
+/* WineForge-Internal: diagnostics/keep-dll-path-setup-free-of-early-tracing-v1.
+ * init_paths() runs before the thread-data key and shared user data exist.
+ * Debug headers may need both, so do not log during DLL path construction.
+ */
 static void set_dll_path(void)
 {
     char *p, *path = getenv( "WINEDLLPATH" );
@@ -323,10 +327,6 @@ static void set_dll_path(void)
     for (i = 0; i < count; i++) dll_path_maxlen = max( dll_path_maxlen, strlen(dll_paths[i]) );
     dll_paths[count] = NULL;
 
-#if defined(__APPLE__) && defined(__x86_64__)
-    if (d3dmetal_path)
-        TRACE( "D3DMetal backend prepended DLL path %s\n", debugstr_a(d3dmetal_path) );
-#endif
 }
 
 
