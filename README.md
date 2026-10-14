@@ -10,8 +10,6 @@ WineForge is a macOS-focused Wine 11.19 source tree focused on improving Windows
 
 It is built around one idea: keep the Wine side understandable while making the Apple Game Porting Toolkit / D3DMetal runtime path easier to test for Windows games on macOS.
 
-For users who do not want to configure Wine manually, the packaged [WineForge release](https://github.com/Alien4042x/WineForge/releases) includes the WineForge Launcher, a convenient graphical interface for managing bottles, game launchers, installed games, and runtime settings.
-
 <img width="1723" height="1042" alt="WineForge" src="https://github.com/user-attachments/assets/7efcc7b6-c846-4b0d-a209-d75f8426dd3f" />
 
 This repository is not upstream Wine, not CrossOver, and not a complete runtime bundle. It is a prepared Wine source tree with a focused patch set.
@@ -48,6 +46,22 @@ WineForge keeps provenance visible in the source where practical. The current tr
 - `26470`
 
 These references are kept intentionally so the origin of the low-level compatibility work remains visible. WineForge-local changes are marked in source and local patch files where practical.
+
+## Native Steam Play
+
+WineForge includes opt-in Wine-side support for games launched by the native macOS Steam client.
+
+The native Steam integration adapts components from [NotProton](https://github.com/NotProtonNot/NotProton), using v1.1.0 at commit [05a27874798f](https://github.com/NotProtonNot/NotProton/commit/05a27874798ffbffb8e64a37595bde6f16d5320a). Original source notices and per-component licenses are retained.
+
+- `ntdll` forwards selected native Steam client exports only when `WINEFORGE_STEAM_BRIDGE=1` is present.
+- `lsteamclient` connects Windows Steam interfaces to the native client.
+- The Windows `steam.exe` helper starts the game through the private WineForge bridge paths and forwards its exit code.
+
+The native Steam hook, Metal overlay shim and client profiles are maintained separately in [WineForge-Steam](https://github.com/Alien4042x/WineForge-Steam). A compatible host application owns installation, per-game settings and environments. Building Wine alone does not install the native connection.
+
+The accepted reference uses Wine 11.19 with x86_64 and 32-bit WoW64. Both API architectures and their actual mapped libraries passed a connected control on 2026-10-14. Game rendering, overlay behavior and anti-cheat compatibility are separate validation gates.
+
+See [the Wine-side integration contract](docs/NATIVE_STEAM.md) for build targets, runtime layout and source provenance.
 
 ## Build Notes
 
@@ -141,7 +155,7 @@ The D3D12 frontend extends the backend with missing video-resource, plane-copy,
 barrier, and resource-lifetime behavior. A separate D3D11 companion supplies
 the context-state, GDI-surface, and D3D10 bridge behavior required by the
 validated Rockstar launcher path. WFDXCompat activates only when D3DMetal is
-the selected process backend; processes without the matching external module
+the selected process backend. Processes without the matching external module
 keep their existing graphics path.
 
 The external runtime is not bundled in this source repository. Its current
@@ -221,7 +235,7 @@ env GRAPHICS_BACKEND=dxmt \
 When the WFDXCompat launcher companion is available, WineForge routes only its
 built-in exact-path Rockstar launcher processes through D3DMetal with the
 companion enabled. The launched game continues to use the global
-`GRAPHICS_BACKEND`; no application list or registry value is required.
+`GRAPHICS_BACKEND`. No application list or registry value is required.
 
 WFUSync remains independent of graphics selection and can be enabled for any of these commands with `WINEWFUSYNC=1`.
 
@@ -237,7 +251,7 @@ Steam is supported for storefront, library, download, and game launch workflows.
 
 Epic Games Launcher is supported for storefront, download, install, and game launch workflows.
 
-Known issue: opening the Friends/social panel can show a black surface in the Store UI. The launcher otherwise remains functional. This appears tied to Epic's accelerated browser surface; WineForge does not currently have a reliable launcher-side switch to disable that GPU acceleration path.
+Known issue: opening the Friends/social panel can show a black surface in the Store UI. The launcher otherwise remains functional. This appears tied to Epic's accelerated browser surface. WineForge does not currently have a reliable launcher-side switch to disable that GPU acceleration path.
 
 ### EA App
 

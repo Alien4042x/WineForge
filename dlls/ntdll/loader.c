@@ -36,6 +36,7 @@
 #include "wine/list.h"
 #include "ntdll_misc.h"
 #include "pe_patches.h"
+#include "steam_bridge.h"
 #include "ddk/ntddk.h"
 #include "ddk/wdm.h"
 
@@ -2321,6 +2322,14 @@ static NTSTATUS build_module( LPCWSTR load_path, const UNICODE_STRING *nt_name, 
     wm->system = system;
 
     update_load_config( *module );
+
+    /* WineForge-Internal: native-steam/client-loader-hook-v1. */
+    if (!is_builtin && !(flags & LDR_DONT_RESOLVE_REFS) &&
+        wineforge_prepare_steam_bridge( wm->ldr.BaseDllName.Buffer, *module, load_path ))
+    {
+        wm->ldr.Flags |= LDR_DONT_RESOLVE_REFS;
+        flags |= LDR_DONT_RESOLVE_REFS;
+    }
 
     /* fixup imports */
 

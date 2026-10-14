@@ -45,6 +45,7 @@ SOURCES = \
 	signal_arm64ec.c \
 	signal_i386.c \
 	signal_x86_64.c \
+	steam_bridge.c \
 	string.c \
 	sync.c \
 	thread.c \
