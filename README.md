@@ -63,6 +63,8 @@ The accepted reference uses Wine 11.20 with x86_64 and 32-bit WoW64. Both API ar
 
 See [the Wine-side integration contract](docs/NATIVE_STEAM.md) for build targets, runtime layout and source provenance.
 
+<img width="613" height="326" alt="notproton" src="https://github.com/user-attachments/assets/a4cad1c8-384f-484b-a20a-ecac35bfab92" />
+
 ## Build Notes
 
 This repository is the patched Wine source tree. It does not include a complete packaged runtime, bottle manager, or release installer.
