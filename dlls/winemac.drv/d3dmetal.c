@@ -138,7 +138,10 @@ static struct d3dmetal_macdrv_win_data *my_get_win_data(HWND hwnd)
     d3dm_data->window_rect = data->rects.window;
     d3dm_data->whole_rect = data->rects.visible;
     d3dm_data->client_rect = data->rects.client;
-    d3dm_data->pixel_format = data->pixel_format;
+    /* WineForge-Internal: d3dmetal/client-surface-pixel-format-v1.
+     * Wine 11.20 removed the driver window's format. Keep the legacy ABI slot
+     * and copy the format owned by this Metal client surface. */
+    d3dm_data->pixel_format = client_surface->client.format;
     /* color_key is no longer present in macdrv_win_data. Assume D3DMetal doesn't use it. */
     d3dm_data->drag_event = data->drag_event;
     d3dm_data->on_screen = data->on_screen;

@@ -32,6 +32,9 @@
  * a small subset of the actual Steam functionality for games that expect
  * Windows version of Steam running. */
 
+/* WineForge-Internal: native-steam/windows-pe-log-formats-v1.
+ * Diagnostic formats below follow the Windows LONG/DWORD types used by the
+ * PE helper and compiler intrinsics. */
 #include "ntstatus.h"
 #define WIN32_NO_STATUS
 #include <windows.h>
@@ -159,7 +162,7 @@ static bool steam_client_init(void)
     steamclient_module = LoadLibraryA("steamclient64.dll");
     if (!steamclient_module)
     {
-        WINE_ERR("steam_client_init: no steamclient64.dll, error %u\n", GetLastError());
+        WINE_ERR("steam_client_init: no steamclient64.dll, error %lu\n", GetLastError());
         return false;
     }
 
@@ -257,7 +260,7 @@ static void setup_steam_registry(void)
         RegSetKeyValueA(key, NULL, "Updating", REG_DWORD, &value, sizeof(value));
         RegCloseKey(key);
     }
-    else WINE_ERR("Could not create key: %u\n", status);
+    else WINE_ERR("Could not create key: %ld\n", status);
 
     language = steam_client_apps->GetCurrentGameLanguage();
     languages = steam_client_apps->GetAvailableGameLanguages();
@@ -676,7 +679,7 @@ static BOOL set_vr_status(HKEY key, DWORD value)
 
     if ((status = RegSetValueExA(key, "state", 0, REG_DWORD, (BYTE *)&value, sizeof(value))))
     {
-        WINE_ERR("Could not set state value, status %#x.\n", status);
+        WINE_ERR("Could not set state value, status %#lx.\n", status);
         return FALSE;
     }
     return TRUE;
@@ -869,9 +872,9 @@ static DWORD WINAPI initialize_vr_data(void *arg)
     vr_initialized = TRUE;
 
     hmd_present = !!client_core->BIsHmdPresent();
-    WINE_TRACE("hmd_present %#x.\n", hmd_present);
+    WINE_TRACE("hmd_present %#lx.\n", hmd_present);
     if ((status = RegSetValueExA(vr_key, "is_hmd_present", 0, REG_DWORD, (BYTE *)&hmd_present, sizeof(hmd_present))))
-        WINE_ERR("Could not set is_hmd_present value, status %#x.\n", status);
+        WINE_ERR("Could not set is_hmd_present value, status %#lx.\n", status);
 
     compositor = reinterpret_cast<vr::IVRCompositor*>(client_core->GetGenericInterface(vr::IVRCompositor_Version, &error));
     if (!compositor)
@@ -892,7 +895,7 @@ static DWORD WINAPI initialize_vr_data(void *arg)
 
     if ((status = RegSetValueExA(vr_key, "openvr_vulkan_instance_extensions", 0, REG_SZ, (BYTE *)buffer, length)))
     {
-        WINE_ERR("Could not set openvr_vulkan_instance_extensions value, status %#x.\n", status);
+        WINE_ERR("Could not set openvr_vulkan_instance_extensions value, status %#lx.\n", status);
         return FALSE;
     }
 
@@ -992,7 +995,7 @@ static DWORD WINAPI initialize_vr_data(void *arg)
 
         if ((status = RegSetValueExA(vr_key, name, 0, REG_SZ, (BYTE *)buffer, length)))
         {
-            WINE_ERR("Could not set %s value, status %#x.\n", name, status);
+            WINE_ERR("Could not set %s value, status %#lx.\n", name, status);
             goto done;
         }
     }
@@ -1015,25 +1018,25 @@ static DWORD WINAPI initialize_vr_data(void *arg)
                 if ((status = RegSetValueExA(vr_key, "openxr_vulkan_instance_extensions", 0, REG_SZ,
                         (BYTE *)xr_inst_ext, strlen(xr_inst_ext) + 1)))
                 {
-                    WINE_ERR("Could not set openxr_vulkan_instance_extensions value, status %#x.\n", status);
+                    WINE_ERR("Could not set openxr_vulkan_instance_extensions value, status %#lx.\n", status);
                     goto done;
                 }
                 if ((status = RegSetValueExA(vr_key, "openxr_vulkan_device_extensions", 0, REG_SZ,
                         (BYTE *)xr_dev_ext, strlen(xr_dev_ext) + 1)))
                 {
-                    WINE_ERR("Could not set openxr_vulkan_device_extensions value, status %#x.\n", status);
+                    WINE_ERR("Could not set openxr_vulkan_device_extensions value, status %#lx.\n", status);
                     goto done;
                 }
                 if ((status = RegSetValueExA(vr_key, "openxr_vulkan_device_vid", 0, REG_DWORD,
                         (BYTE *)&vid, sizeof(vid))))
                 {
-                    WINE_ERR("Could not set openxr_vulkan_device_vid value, status %#x.\n", status);
+                    WINE_ERR("Could not set openxr_vulkan_device_vid value, status %#lx.\n", status);
                     goto done;
                 }
                 if ((status = RegSetValueExA(vr_key, "openxr_vulkan_device_pid", 0, REG_DWORD,
                         (BYTE *)&pid, sizeof(pid))))
                 {
-                    WINE_ERR("Could not set openxr_vulkan_device_pid value, status %#x.\n", status);
+                    WINE_ERR("Could not set openxr_vulkan_device_pid value, status %#lx.\n", status);
                     goto done;
                 }
             }
@@ -1046,7 +1049,7 @@ static DWORD WINAPI initialize_vr_data(void *arg)
     }
     else
     {
-        WINE_WARN("Could not load wineopenxr.dll, err %u.\n", GetLastError());
+        WINE_WARN("Could not load wineopenxr.dll, err %lu.\n", GetLastError());
     }
 
     vr_status = 1;
@@ -1086,12 +1089,12 @@ static void setup_vr_registry(void)
     if ((status = RegCreateKeyExA(HKEY_CURRENT_USER, "Software\\Wine\\VR", 0, NULL, REG_OPTION_VOLATILE,
             KEY_ALL_ACCESS, NULL, &vr_key, &disp)))
     {
-        WINE_ERR("Could not create key, status %#x.\n", status);
+        WINE_ERR("Could not create key, status %#lx.\n", status);
         return;
     }
     if (disp != REG_CREATED_NEW_KEY)
     {
-        WINE_ERR("VR key already exists, disp %#x.\n", disp);
+        WINE_ERR("VR key already exists, disp %#lx.\n", disp);
         RegCloseKey(vr_key);
         return;
     }
@@ -1101,7 +1104,7 @@ static void setup_vr_registry(void)
         if ((status = RegSetValueExW(vr_key, PROTON_VR_RUNTIME_W, 0, REG_SZ,
                 (BYTE *)pathW, (lstrlenW(pathW) + 1) * sizeof(WCHAR))))
         {
-            WINE_ERR("Could not set PROTON_VR_RUNTIME value, status %#x.\n", status);
+            WINE_ERR("Could not set PROTON_VR_RUNTIME value, status %#lx.\n", status);
             set_vr_status(vr_key, ~0u);
             RegCloseKey(vr_key);
             return;
@@ -1123,7 +1126,7 @@ static void setup_vr_registry(void)
 
     if (!(thread = CreateThread(NULL, 0, initialize_vr_data, (void *)vr_key, 0, NULL)))
     {
-        WINE_ERR("Could not create thread, error %u.\n", GetLastError());
+        WINE_ERR("Could not create thread, error %lu.\n", GetLastError());
         RegCloseKey(vr_key);
         return;
     }
@@ -1374,7 +1377,7 @@ run:
 
         link2ea = TRUE;
         if (!SetUserObjectInformationA(desktop, 1000, &timeout, sizeof(timeout)))
-            WINE_ERR("Failed to set desktop timeout, err %u.\n", GetLastError());
+            WINE_ERR("Failed to set desktop timeout, err %lu.\n", GetLastError());
 
         if (!RegOpenKeyExW(HKEY_LOCAL_MACHINE, ea_desktop_pathW, 0, KEY_ALL_ACCESS, &eakey))
         {
@@ -1394,20 +1397,20 @@ run:
             {
                 if (QueryServiceStatus(service, &status))
                 {
-                    TRACE("dwCurrentState %#x.\n", status.dwCurrentState);
+                    TRACE("dwCurrentState %#lx.\n", status.dwCurrentState);
                     if (status.dwCurrentState == SERVICE_STOP_PENDING || status.dwCurrentState == SERVICE_STOPPED)
                     {
                         ret = DeleteFileA("C:\\ProgramData\\EA Desktop\\backgroundservice.ini");
-                        WARN("Tried to delete backgroundservice.ini, ret %d, error %u.\n", ret, GetLastError());
+                        WARN("Tried to delete backgroundservice.ini, ret %d, error %lu.\n", ret, GetLastError());
                     }
                 }
-                else ERR("Could not query service status, error %u.\n", GetLastError());
+                else ERR("Could not query service status, error %lu.\n", GetLastError());
                 CloseServiceHandle(service);
             }
-            else TRACE("Could not open EABackgroundService, error %u.\n", GetLastError());
+            else TRACE("Could not open EABackgroundService, error %lu.\n", GetLastError());
             CloseServiceHandle(manager);
         }
-        else ERR("Could not open service manager, error %u.\n", GetLastError());
+        else ERR("Could not open service manager, error %lu.\n", GetLastError());
     }
     hide_window = env_nonzero("PROTON_HIDE_PROCESS_WINDOW");
 
@@ -1467,7 +1470,7 @@ run:
 
         if (!CreateProcessW(NULL, cmdline, NULL, NULL, TRUE, flags, NULL, NULL, &si, &pi))
         {
-            WINE_ERR("Failed to create process %s: %u\n", wine_dbgstr_w(cmdline), GetLastError());
+            WINE_ERR("Failed to create process %s: %lu\n", wine_dbgstr_w(cmdline), GetLastError());
             return INVALID_HANDLE_VALUE;
         }
 
@@ -1560,13 +1563,13 @@ static void setup_steam_files(void)
 
     if (!CreateDirectoryW(config_pathW, NULL) && GetLastError() != ERROR_ALREADY_EXISTS)
     {
-        WINE_ERR("Failed to create config directory, GetLastError() %u.\n", GetLastError());
+        WINE_ERR("Failed to create config directory, GetLastError() %lu.\n", GetLastError());
         return;
     }
 
     if (!CreateDirectoryW(steamapps_pathW, NULL) && GetLastError() != ERROR_ALREADY_EXISTS)
     {
-        WINE_ERR("Failed to create steamapps directory, GetLastError() %u.\n", GetLastError());
+        WINE_ERR("Failed to create steamapps directory, GetLastError() %lu.\n", GetLastError());
         return;
     }
 
@@ -1674,7 +1677,7 @@ static HANDLE find_ack_event(void)
     status = NtOpenDirectoryObject( &dir, DIRECTORY_QUERY, &attr );
     if (status)
     {
-        WINE_WARN("Failed to open directory %s, status %#x.\n", wine_dbgstr_w(name), status);
+        WINE_WARN("Failed to open directory %s, status %#lx.\n", wine_dbgstr_w(name), status);
         return NULL;
     }
 
@@ -1686,13 +1689,13 @@ static HANDLE find_ack_event(void)
             WINE_TRACE("Found event %s.\n", wine_dbgstr_w(di->ObjectName.Buffer));
             ret = OpenEventW(SYNCHRONIZE, FALSE, di->ObjectName.Buffer);
             if (!ret)
-                WINE_WARN("Failed to create event, err %u.\n", GetLastError());
+                WINE_WARN("Failed to create event, err %lu.\n", GetLastError());
             break;
         }
         status = NtQueryDirectoryObject(dir, di, sizeof(buffer), TRUE, FALSE, &context, &size);
     }
     if (status && status != STATUS_NO_MORE_ENTRIES)
-        WINE_WARN("NtQueryDirectoryObject failed, status %#x.\n", status);
+        WINE_WARN("NtQueryDirectoryObject failed, status %#lx.\n", status);
     WINE_TRACE("ret %p.\n", ret);
 
     CloseHandle(dir);
@@ -1710,20 +1713,20 @@ static DWORD WINAPI steam_drm_thread(void *arg)
     consume = CreateSemaphoreA(NULL, 0, 512, "STEAM_DIPC_CONSUME");
     if (!consume)
     {
-        WINE_ERR("Failed to create consume semaphore, err %u.\n", GetLastError());
+        WINE_ERR("Failed to create consume semaphore, err %lu.\n", GetLastError());
         return -1;
     }
     produce = CreateSemaphoreA(NULL, 1, 512, "SREAM_DIPC_PRODUCE");
     if (!produce)
     {
         CloseHandle(consume);
-        WINE_ERR("Failed to create produce semaphore, err %u.\n", GetLastError());
+        WINE_ERR("Failed to create produce semaphore, err %lu.\n", GetLastError());
         return -1;
     }
 
     pid = GetProcessId(child);
 
-    WINE_TRACE("Child pid %04x.\n", pid);
+    WINE_TRACE("Child pid %04lx.\n", pid);
 
     while (WaitForSingleObject(consume, INFINITE) == WAIT_OBJECT_0)
     {
@@ -1734,7 +1737,7 @@ static DWORD WINAPI steam_drm_thread(void *arg)
         if (start_ack)
             SetEvent(start_ack);
         ReleaseSemaphore(produce, 1, &prev);
-        WINE_TRACE("prev %d.\n", prev);
+        WINE_TRACE("prev %ld.\n", prev);
     }
 
     return 0;

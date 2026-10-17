@@ -7,7 +7,9 @@ IMPORTS   = $(CXX_PE_LIBS) user32 advapi32 shlwapi shell32 msi
 EXTRADLLFLAGS = -mwindows -mcygwin -static-libgcc
 # __WINESRC__ is re-added because WINE_EXTERNAL drops it, and ERR() and ARRAY_SIZE()
 # are hidden without it. PATH_MAX is defined because mingw's limits.h has none.
-EXTRADEFS = -DWINE_NO_LONG_TYPES -D__WINESRC__ -DPATH_MAX=4096 -include posix_compat.h
+# WineForge-Internal: native-steam/windows-pe-intrinsic-types-v1.
+# Compiler intrinsics require the normal Windows LONG/DWORD declarations.
+EXTRADEFS = -D__WINESRC__ -DPATH_MAX=4096 -include posix_compat.h
 
 EXTRAINCL = \
 	-I$(srcdir)/proton-headers/steamworks_sdk_142 \

@@ -59,10 +59,12 @@ The WineForge ntdll bridge uses Wine's typed loader interface. WineForge adaptat
 
 ## Validation scope
 
-The local source reference is WineForge commit `a342f4aeb23d719339f444b9e94e06ecf0ff1a14` plus the Steam component changes. All 3187 retained component-source hashes matched the built candidate during preparation.
+The original Wine 11.19 source reference was WineForge commit `a342f4aeb23d719339f444b9e94e06ecf0ff1a14` plus the Steam component changes. All 3187 retained component-source hashes matched that built candidate during preparation.
 
-The accepted connected control on 2026-10-14 used native Steam client SHA-256 `625715ada315323351ada75a077142c15d4b742be2db9e63ec354828082ab194`. It passed in 32.128 seconds with distinct 64-bit and 32-bit probe processes. Both connected through SteamClient017, Utils and Apps, reported AppID 2179380, loaded the private PE clients and mapped the expected ntdll, lsteamclient and native Steam libraries. Spaced arguments and child/helper exit code 73 were preserved.
+The Wine 11.19 connected control on 2026-10-14 used native Steam client SHA-256 `625715ada315323351ada75a077142c15d4b742be2db9e63ec354828082ab194`. It passed in 32.128 seconds with distinct 64-bit and 32-bit probe processes. Both connected through SteamClient017, Utils and Apps, reported AppID 2179380, loaded the private PE clients and mapped the expected ntdll, lsteamclient and native Steam libraries. Spaced arguments and child/helper exit code 73 were preserved.
 
-The exact installed signed runtime is bound to that test by its separate app-owned receipt. User prefix registries and protected runtime files were unchanged. The test prefix was stopped and no probe processes remained.
+The accepted Wine 11.20 / WineForge 0.6.0.7 control on 2026-10-17 used native Steam client SHA-256 `2dc4edcfa738fbcfa13a137b351fa94941c176991f2ecb85924077986853b99c`. It passed in 12.081 seconds with separate x86_64 and i386 probe processes. Both connected through SteamClient017, Utils and Apps, reported AppID 2179380 and loaded the private PE clients. Process observations confirmed the matching ntdll, lsteamclient and native Steam library mappings. Spaced arguments and child/helper exit code 73 were preserved.
 
-This verifies the bridge contract. It does not validate every Steam interface, a full game session, graphics performance, the Metal overlay or anti-cheat compatibility. It is not validation of a Wine 11.20 port, native ARM64 Wine or FEX.
+Each exact signed runtime is bound to its test by a separate app-owned receipt. User prefix registries and protected runtime files were unchanged. The isolated test prefixes were stopped and no probe processes remained.
+
+These controls verify the bridge contract for the stated Wine builds. They do not validate every Steam interface, a full game session, graphics performance, the Metal overlay or anti-cheat compatibility. They do not cover native ARM64 Wine or FEX.

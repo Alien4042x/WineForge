@@ -400,9 +400,6 @@ extern NTSTATUS open_hkcu_key( const char *path, HANDLE *key );
 
 extern NTSTATUS sync_ioctl( HANDLE file, ULONG code, void *in_buffer, ULONG in_size,
                             void *out_buffer, ULONG out_size );
-extern NTSTATUS cdrom_DeviceIoControl( HANDLE device, HANDLE event, PIO_APC_ROUTINE apc, void *apc_user,
-                                       IO_STATUS_BLOCK *io, UINT code, void *in_buffer,
-                                       UINT in_size, void *out_buffer, UINT out_size );
 extern NTSTATUS serial_DeviceIoControl( HANDLE device, HANDLE event, PIO_APC_ROUTINE apc, void *apc_user,
                                         IO_STATUS_BLOCK *io, UINT code, void *in_buffer,
                                         UINT in_size, void *out_buffer, UINT out_size );
@@ -714,6 +711,8 @@ extern void *libd3dshared_load_addr, *libd3dshared_code_end;
 #define D3DMETAL_IMPORT_ATTR
 #define D3DMETAL_ABI_WRAPPER(name, sysv_name, msabi_name)
 #endif
+
+static const ULONG cpsr_user_mask = 0xf620fc30;
 
 /* LDT definitions */
 

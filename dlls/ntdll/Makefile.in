@@ -52,7 +52,6 @@ SOURCES = \
 	threadpool.c \
 	time.c \
 	unix/alpc.c \
-	unix/cdrom.c \
 	unix/debug.c \
 	unix/d3dmetal_loader.c \
 	unix/dxmt_loader.c \
