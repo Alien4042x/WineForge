@@ -63,6 +63,14 @@ The accepted reference uses Wine 11.20 with x86_64 and 32-bit WoW64. Both API ar
 
 See [the Wine-side integration contract](docs/NATIVE_STEAM.md) for build targets, runtime layout and source provenance.
 
+### Native Steam setup
+1. Fully quit Steam.
+2. Open WineForge settings, enable **Steam Play**, and click **Install connection**. Confirm the installation prompt.
+3. If macOS blocks the modification of Steam, open **System Settings → Privacy & Security → App Management** and allow WineForge to modify other apps. Then retry the installation.
+4. Once the connection is installed, open Steam normally and launch your Windows games.
+
+If installation fails, please report it in the [GitHub issues](https://github.com/Alien4042x/WineForge/issues). Include the full error message or a screenshot, your macOS version and Mac model.
+
 <img width="613" height="326" alt="notproton" src="https://github.com/user-attachments/assets/a4cad1c8-384f-484b-a20a-ecac35bfab92" />
 
 ## Build Notes
