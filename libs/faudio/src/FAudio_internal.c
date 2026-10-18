@@ -434,15 +434,33 @@ static void save_unaligned_end_data(FAudioSourceVoice *voice, const struct queue
 		end_pos += buffer->play_bytes;
 	}
 
-	if (byte_pos == end_pos)
+	if (byte_pos >= end_pos)
 		return;
 
 	/* If the last buffer was also unaligned, and this one
 	 * wasn't big enough to complete the block, then we'll
 	 * already have some unaligned bytes. If this one was
 	 * big enough to complete the block, we shouldn't have
-	 * any bytes left over from the last buffer. */
-	FAudio_assert(voice->src.unaligned_size + (end_pos - byte_pos) < block_size);
+	 * any bytes left over from the last buffer.
+	 *
+	 * Bytes left over that no buffer collected (the queue was
+	 * flushed, or a buffer ended the stream) would overflow the
+	 * block-sized stash, into whatever follows it on the heap:
+	 * drop them instead. (Wolfenstein: The New Order flushes its
+	 * music voices at state changes and crashed on the heap
+	 * damage.) */
+	if (voice->src.unaligned_size + (end_pos - byte_pos) >= block_size)
+	{
+		LOG_ERROR(
+			voice->audio,
+			"Dropping %u stale unaligned bytes (block %u)",
+			voice->src.unaligned_size,
+			block_size
+		)
+		voice->src.unaligned_size = 0;
+		if (end_pos - byte_pos >= block_size)
+			return;
+	}
 
 	if (!voice->src.unaligned_data)
 		voice->src.unaligned_data = voice->audio->pMalloc(block_size);
@@ -524,6 +542,9 @@ static void end_buffer(FAudioSourceVoice *voice)
 
 			FAudio_PlatformLockMutex(voice->src.bufferLock);
 			LOG_MUTEX_LOCK(voice->audio, voice->src.bufferLock)
+
+			/* OnLoopEnd may have submitted buffers, reallocating the queue. */
+			buffer = &voice->src.queued_buffers[0];
 		}
 
 		buffer->first_block_offset = 0;
@@ -644,19 +665,39 @@ static void FAudio_INTERNAL_DecodeBuffers(
 
 	LOG_FUNC_ENTER(voice->audio)
 
-	/* This should never go past the max ratio size */
-	FAudio_assert(*toDecode <= voice->src.decodeSamples);
+	/* This should never go past the max ratio size. If it does, decoding
+	 * would write past the end of decoded_audio, into the heap. */
+	if (*toDecode > voice->src.decodeSamples)
+	{
+		LOG_ERROR(
+			voice->audio,
+			"Decoding %llu samples, more than the %u the voice holds",
+			(unsigned long long) *toDecode,
+			voice->src.decodeSamples
+		)
+		*toDecode = voice->src.decodeSamples;
+	}
 
 	while (decoded < *toDecode && voice->src.queued_buffer_count)
 	{
-		float *dst = voice->audio->decoded_audio + (decoded * voice->src.format->nChannels);
-		struct queued_buffer *buffer = &voice->src.queued_buffers[0];
+		float *dst;
+		struct queued_buffer *buffer;
 		uint32_t decode_count;
 
+		/* This may queue a buffer in front, reallocating the queue. */
 		try_collect_unaligned_data(voice);
 
 		/* Start-of-buffer behavior */
-		start_buffer(voice, buffer);
+		start_buffer(voice, &voice->src.queued_buffers[0]);
+
+		/* Only now: start_buffer unlocks the voice for OnBufferStart, whose
+		 * application may submit buffers (reallocating queued_buffers) or
+		 * create voices (reallocating decoded_audio), and pointers taken
+		 * before it would decode into freed memory. (Wolfenstein: The New
+		 * Order changes its music as the player enters a turret, and the
+		 * floats written to freed memory corrupted the heap.) */
+		buffer = &voice->src.queued_buffers[0];
+		dst = voice->audio->decoded_audio + (decoded * voice->src.format->nChannels);
 
 		/* Number of samples we are decoding in one call. */
 		decode_count = FAudio_min(*toDecode - decoded,
@@ -1830,6 +1871,11 @@ uint32_t FAudio_INTERNAL_VoiceOutputFrequency(
 			return FAUDIO_E_INVALID_CALL;
 		}
 		voice->src.resampleSamples = newResampleSamples;
+
+		/* The resample step depends on the output rate too: make
+		 * the next mix compute it for this output, or it decodes
+		 * more samples than decoded_audio holds. */
+		voice->src.resampleFreq = 0.0f;
 	}
 	else /* (voice->type == FAUDIO_VOICE_SUBMIX) */
 	{
