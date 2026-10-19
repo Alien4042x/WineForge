@@ -3,6 +3,7 @@
  *
  * Copyright 2011, 2012, 2013 Ken Thomases for CodeWeavers Inc.
  * Copyright 2021 Tim Clem for CodeWeavers Inc.
+ * Copyright 2026 WineForge
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -21,6 +22,7 @@
 
 #import <AppKit/AppKit.h>
 
+/* WineForge-Internal: fullscreen/native-window-v1. */
 
 @protocol WineClipCursorHandler <NSObject>
 
@@ -35,6 +37,9 @@
     - (void) setRetinaMode:(BOOL)mode;
 
     @optional
+    /* Reapply an existing clip without releasing or repositioning the cursor. */
+    - (BOOL) refreshClippingCursor;
+
     /* If provided, should reposition the cursor as needed given the current
      * clipping rect. If not provided, the location will be clipped by
      * -clipCursorLocation, and the cursor will be warped normally.
@@ -65,6 +70,8 @@
      * mouseConfinementRect set). Using this rather than a WineWindow* to avoid
      * tricky retain situations. */
     NSInteger clippingWindowNumber;
+    /* Native fullscreen can recreate the window device. Do not retain its owner. */
+    NSHashTable* clippingWindow;
 }
 
     /* Returns true if the API in use by this handler is available. */

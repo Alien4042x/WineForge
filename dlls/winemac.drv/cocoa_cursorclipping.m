@@ -3,6 +3,7 @@
  *
  * Copyright 2011, 2012, 2013 Ken Thomases for CodeWeavers Inc.
  * Copyright 2021 Tim Clem for CodeWeavers Inc.
+ * Copyright 2026 WineForge
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -25,6 +26,9 @@
 #import "cocoa_app.h"
 #import "cocoa_cursorclipping.h"
 #import "cocoa_window.h"
+#import "cocoa_fullscreen.h"
+
+/* WineForge-Internal: fullscreen/native-window-v1. */
 
 #pragma GCC diagnostic ignored "-Wdeclaration-after-statement"
 
@@ -429,6 +433,52 @@ static void scale_rect_for_retina_mode(BOOL mode, CGRect *cursorClipRect)
 
 @synthesize clippingCursor, cursorClipRect;
 
+    - (id) init
+    {
+        self = [super init];
+        if (self && macdrv_cocoa_fullscreen_available())
+        {
+            clippingWindow = [[NSHashTable weakObjectsHashTable] retain];
+            NSNotificationCenter* center = [NSNotificationCenter defaultCenter];
+            [center addObserver:self selector:@selector(windowConfinementDidChange:)
+                           name:NSWindowDidEnterFullScreenNotification object:nil];
+            [center addObserver:self selector:@selector(windowConfinementDidChange:)
+                           name:NSWindowDidExitFullScreenNotification object:nil];
+            [center addObserver:self selector:@selector(windowConfinementDidChange:)
+                           name:NSWindowDidBecomeKeyNotification object:nil];
+            [center addObserver:self selector:@selector(windowConfinementDidChange:)
+                           name:NSWindowDidDeminiaturizeNotification object:nil];
+        }
+        return self;
+    }
+
+    - (void) dealloc
+    {
+        [[NSNotificationCenter defaultCenter] removeObserver:self];
+        [clippingWindow release];
+        [super dealloc];
+    }
+
+    - (BOOL) refreshClippingCursor
+    {
+        if (!clippingCursor || !clippingWindow) return TRUE;
+
+        NSWindow* window = [clippingWindow anyObject];
+        if (!window) return FALSE;
+
+        NSRect rect = [[self class] rectForScreenRect:cursorClipRect inWindow:window];
+        if (NSIsEmptyRect(rect)) return FALSE;
+
+        [window setMouseConfinementRect:macdrv_cocoa_fullscreen_confinement(window, rect)];
+        return TRUE;
+    }
+
+    - (void) windowConfinementDidChange:(NSNotification*)notification
+    {
+        if (clippingCursor && notification.object == [clippingWindow anyObject])
+            [self refreshClippingCursor];
+    }
+
     + (BOOL) isAvailable
     {
         return [NSWindow instancesRespondToSelector:@selector(setMouseConfinementRect:)];
@@ -476,9 +526,12 @@ static void scale_rect_for_retina_mode(BOOL mode, CGRect *cursorClipRect)
             return FALSE;
         }
 
+        clipRectInWindowCoords = macdrv_cocoa_fullscreen_confinement(ownerWindow, clipRectInWindowCoords);
         [ownerWindow setMouseConfinementRect:clipRectInWindowCoords];
 
         clippingWindowNumber = ownerWindow.windowNumber;
+        [clippingWindow removeAllObjects];
+        [clippingWindow addObject:ownerWindow];
         cursorClipRect = rect;
         clippingCursor = TRUE;
 
@@ -487,10 +540,12 @@ static void scale_rect_for_retina_mode(BOOL mode, CGRect *cursorClipRect)
 
     - (BOOL) stopClippingCursor
     {
-        NSWindow *ownerWindow = [NSApp windowWithWindowNumber:clippingWindowNumber];
+        NSWindow *ownerWindow = clippingWindow ? [clippingWindow anyObject] :
+                                               [NSApp windowWithWindowNumber:clippingWindowNumber];
         [ownerWindow setMouseConfinementRect:NSZeroRect];
 
         clippingCursor = FALSE;
+        [clippingWindow removeAllObjects];
 
         return TRUE;
     }

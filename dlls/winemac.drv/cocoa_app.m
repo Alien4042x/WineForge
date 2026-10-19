@@ -18,6 +18,8 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
  */
 
+/* WineForge-Internal: fullscreen/native-window-v1. */
+
 #import "config.h"
 #import "macdrv.h"
 
@@ -25,6 +27,7 @@
 #import "cocoa_cursorclipping.h"
 #import "cocoa_event.h"
 #import "cocoa_window.h"
+#import "cocoa_fullscreen.h"
 
 #pragma GCC diagnostic ignored "-Wdeclaration-after-statement"
 
@@ -1220,7 +1223,11 @@ static NSString* WineLocalizedString(unsigned int stringID)
         }
 
         if (self.clippingCursor && CGRectEqualToRect(rect, clipCursorHandler.cursorClipRect))
+        {
+            if ([clipCursorHandler respondsToSelector:@selector(refreshClippingCursor)])
+                return [clipCursorHandler refreshClippingCursor];
             return TRUE;
+        }
 
         if (![clipCursorHandler startClippingCursor:rect])
             return FALSE;
@@ -1531,7 +1538,9 @@ static NSString* WineLocalizedString(unsigned int stringID)
                     NSPoint nspoint = [self flippedMouseLocation:NSPointFromCGPoint(pt)];
                     NSRect contentRect = [window contentRectForFrameRect:[window frame]];
                     process = NSMouseInRect(nspoint, contentRect, NO);
-                    if (process && [window styleMask] & NSWindowStyleMaskResizable)
+                    if (process && ([window styleMask] & NSWindowStyleMaskResizable) &&
+                        (!macdrv_cocoa_fullscreen_available() ||
+                         !([window styleMask] & NSWindowStyleMaskFullScreen)))
                     {
                         // Ignore clicks in the grow box (resize widget).
                         HIPoint origin = { 0, 0 };
@@ -1797,6 +1806,24 @@ static NSString* WineLocalizedString(unsigned int stringID)
         {
             [self handleMouseButton:anEvent];
             ret = mouseCaptureWindow && ![windowsBeingDragged count];
+            if (!ret && ![windowsBeingDragged count])
+            {
+                WineWindow* window = (WineWindow*)[anEvent window];
+
+                if ([NSApp isActive] && [window isKindOfClass:[WineWindow class]] &&
+                    [window isKeyWindow] && [window isOnActiveSpace] &&
+                    ([window styleMask] & NSWindowStyleMaskFullScreen) &&
+                    macdrv_cocoa_fullscreen_managed(window))
+                {
+                    NSPoint point = [self flippedMouseLocation:NSPointFromCGPoint(CGEventGetLocation([anEvent CGEvent]))];
+                    NSRect contentRect = [window contentRectForFrameRect:[window frame]];
+
+                    /* Wine already queued the click. Fullscreen game content has
+                     * no native window controls for AppKit to handle. */
+                    if (NSMouseInRect(point, contentRect, NO))
+                        ret = TRUE;
+                }
+            }
         }
         else if (type == NSEventTypeScrollWheel)
         {
@@ -2542,8 +2569,8 @@ int macdrv_set_cursor_position(CGPoint pos)
 /***********************************************************************
  *              macdrv_clip_cursor
  *
- * Sets the cursor cursor clipping rectangle.  If the rectangle is equal
- * to or larger than the whole desktop region, the cursor is unclipped.
+ * Sets the cursor clipping rectangle. macOS 27 native fullscreen keeps finite
+ * full-monitor confinement. Older systems use Wine's desktop containment rule.
  * Returns zero on failure, non-zero on success.
  */
 int macdrv_clip_cursor(CGRect r)
@@ -2560,19 +2587,21 @@ int macdrv_clip_cursor(CGRect r)
 
         if (!CGRectIsInfinite(rect))
         {
-            NSRect nsrect = NSRectFromCGRect(rect);
-            NSScreen* screen;
-
-            /* Convert the rectangle from top-down coords to bottom-up. */
-            [controller flipRect:&nsrect];
-
-            clipping = FALSE;
-            for (screen in [NSScreen screens])
+            if (macdrv_cocoa_fullscreen_available())
+                clipping = TRUE;
+            else
             {
-                if (!NSContainsRect(nsrect, [screen frame]))
+                NSRect nsrect = NSRectFromCGRect(rect);
+                NSScreen* screen;
+
+                [controller flipRect:&nsrect];
+                for (screen in [NSScreen screens])
                 {
-                    clipping = TRUE;
-                    break;
+                    if (!NSContainsRect(nsrect, [screen frame]))
+                    {
+                        clipping = TRUE;
+                        break;
+                    }
                 }
             }
         }

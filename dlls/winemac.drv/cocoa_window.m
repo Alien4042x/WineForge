@@ -18,6 +18,8 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
  */
 
+/* WineForge-Internal: fullscreen/native-window-v1. */
+
 #import "config.h"
 #import "macdrv.h"
 
@@ -27,6 +29,7 @@
 #include <dlfcn.h>
 
 #import "cocoa_window.h"
+#import "cocoa_fullscreen.h"
 
 #import "cocoa_app.h"
 #import "cocoa_event.h"
@@ -472,6 +475,18 @@ static inline BOOL stage_manager_enabled(void)
         }
         [glContexts addObjectsFromArray:pendingGlContexts];
         [pendingGlContexts removeAllObjects];
+    }
+
+    - (void) viewDidMoveToWindow
+    {
+        [super viewDidMoveToWindow];
+        if (macdrv_cocoa_fullscreen_available() && self.window)
+        {
+            NSWindow *window = self.window;
+            dispatch_async(dispatch_get_main_queue(), ^{
+                macdrv_cocoa_fullscreen_reconcile(window);
+            });
+        }
     }
 
     - (void) addGLContext:(WineOpenGLContext*)context
@@ -1101,9 +1116,9 @@ static inline BOOL stage_manager_enabled(void)
     {
         NSUInteger style = [self styleMask];
 
-        if (behavior & NSWindowCollectionBehaviorParticipatesInCycle &&
+        if (macdrv_cocoa_fullscreen_managed(self) || (behavior & NSWindowCollectionBehaviorParticipatesInCycle &&
             style & NSWindowStyleMaskResizable && !(style & NSWindowStyleMaskUtilityWindow) && !maximized &&
-            !(self.parentWindow || self.latentParentWindow))
+            !(self.parentWindow || self.latentParentWindow)))
         {
             behavior |= NSWindowCollectionBehaviorFullScreenPrimary;
             behavior &= ~NSWindowCollectionBehaviorFullScreenAuxiliary;
@@ -1130,6 +1145,7 @@ static inline BOOL stage_manager_enabled(void)
                                              NSWindowStyleMaskNonactivatingPanel;
         NSUInteger currentStyle = [self styleMask];
         NSUInteger newStyle = style_mask_for_features(wf) | (currentStyle & ~usedStyles);
+        newStyle = macdrv_cocoa_fullscreen_style(self, newStyle);
 
         self.preventsAppActivation = wf->prevents_app_activation;
 
@@ -1784,6 +1800,8 @@ static inline BOOL stage_manager_enabled(void)
                Generate a frame-changed event just in case.  The back end will ignore
                it if nothing actually changed. */
             [self windowDidResize:nil skipSizeMove:TRUE];
+            if (macdrv_cocoa_fullscreen_available())
+                dispatch_async(dispatch_get_main_queue(), ^{ macdrv_cocoa_fullscreen_reconcile(self); });
 
             if (![self isExcludedFromWindowsMenu])
                 [NSApp addWindowsItem:self title:[self title] filename:NO];
@@ -1813,6 +1831,7 @@ static inline BOOL stage_manager_enabled(void)
         }
 
         pendingOrderOut = FALSE;
+        macdrv_cocoa_fullscreen_will_hide(self);
 
         if ([self isMiniaturized])
             pendingMinimize = TRUE;
@@ -2760,6 +2779,8 @@ static inline BOOL stage_manager_enabled(void)
 
     - (void)windowDidBecomeKey:(NSNotification *)notification
     {
+        if (macdrv_cocoa_fullscreen_available())
+            dispatch_async(dispatch_get_main_queue(), ^{ macdrv_cocoa_fullscreen_reconcile(self); });
         WineApplicationController* controller = [WineApplicationController sharedController];
         NSEvent* event = [controller lastFlagsChanged];
         if (event)
@@ -2812,6 +2833,10 @@ static inline BOOL stage_manager_enabled(void)
     {
         enteringFullScreen = FALSE;
         enteredFullScreenTime = [[NSProcessInfo processInfo] systemUptime];
+        macdrv_cocoa_fullscreen_transition(self, YES, YES, NO);
+        /* Native activation can reset clipping without changing Win32 geometry. */
+        if (macdrv_cocoa_fullscreen_managed(self))
+            [self postWindowFrameChanged:self.frame fullscreen:TRUE resizing:FALSE skipSizeMove:TRUE];
         if (pendingOrderOut)
             [self doOrderOut];
     }
@@ -2821,6 +2846,7 @@ static inline BOOL stage_manager_enabled(void)
         exitingFullScreen = FALSE;
         [self setFrameAndWineFrame:nonFullscreenFrame];
         [self windowDidResize:nil];
+        macdrv_cocoa_fullscreen_transition(self, NO, YES, NO);
         if (pendingOrderOut)
             [self doOrderOut];
     }
@@ -2829,6 +2855,7 @@ static inline BOOL stage_manager_enabled(void)
     {
         enteringFullScreen = FALSE;
         enteredFullScreenTime = 0;
+        macdrv_cocoa_fullscreen_transition(self, YES, YES, YES);
         if (pendingOrderOut)
             [self doOrderOut];
     }
@@ -2836,6 +2863,7 @@ static inline BOOL stage_manager_enabled(void)
     - (void) windowDidFailToExitFullScreen:(NSWindow*)window
     {
         exitingFullScreen = FALSE;
+        macdrv_cocoa_fullscreen_transition(self, NO, YES, YES);
         [self windowDidResize:nil];
         if (pendingOrderOut)
             [self doOrderOut];
@@ -2937,6 +2965,7 @@ static inline BOOL stage_manager_enabled(void)
         WineWindow* child;
 
         if (fakingClose) return;
+        macdrv_cocoa_fullscreen_close(self);
         if (latentParentWindow)
         {
             [latentParentWindow->latentChildWindows removeObjectIdenticalTo:self];
@@ -2954,13 +2983,21 @@ static inline BOOL stage_manager_enabled(void)
     - (void) windowWillEnterFullScreen:(NSNotification*)notification
     {
         enteringFullScreen = TRUE;
+        macdrv_cocoa_fullscreen_transition(self, YES, NO, NO);
         nonFullscreenFrame = self.wine_fractionalFrame;
     }
 
     - (void) windowWillExitFullScreen:(NSNotification*)notification
     {
         exitingFullScreen = TRUE;
+        macdrv_cocoa_fullscreen_transition(self, NO, NO, NO);
         [self postWindowFrameChanged:nonFullscreenFrame fullscreen:FALSE resizing:FALSE skipSizeMove:FALSE];
+    }
+
+    - (NSApplicationPresentationOptions) window:(NSWindow*)window
+                        willUseFullScreenPresentationOptions:(NSApplicationPresentationOptions)options
+    {
+        return macdrv_cocoa_fullscreen_options(window, options);
     }
 
     - (void)windowWillMiniaturize:(NSNotification *)notification

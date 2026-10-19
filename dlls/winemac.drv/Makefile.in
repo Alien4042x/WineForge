@@ -23,6 +23,7 @@ SOURCES = \
 	cocoa_cursorclipping.m \
 	cocoa_display.m \
 	cocoa_event.m \
+	cocoa_fullscreen.m \
 	cocoa_gcmouse.m \
 	cocoa_main.m \
 	cocoa_opengl.m \

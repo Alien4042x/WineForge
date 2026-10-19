@@ -500,6 +500,9 @@ extern void macdrv_set_window_shape(WineWindow *window, const CGRect *rects, int
 extern void macdrv_set_window_alpha(WineWindow *window, CGFloat alpha);
 extern void macdrv_window_use_per_pixel_alpha(WineWindow *window, bool use_per_pixel_alpha);
 extern void macdrv_set_window_mask(WineWindow *window, CGRect rect);
+/* WineForge-Internal: fullscreen/native-window-intent-v1. */
+extern int macdrv_cocoa_fullscreen_available(void);
+extern void macdrv_set_window_native_fullscreen(WineWindow *window, int requested);
 extern void macdrv_give_cocoa_window_focus(WineWindow *window, bool activate);
 extern void macdrv_set_window_min_max_sizes(WineWindow *window, CGSize min_size, CGSize max_size);
 extern WineContentView *macdrv_create_view(CGRect rect);
