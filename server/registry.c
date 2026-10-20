@@ -1811,7 +1811,16 @@ static void init_supported_machines(void)
 #elif defined(__arm__)
     if (prefix_type == PREFIX_32BIT) supported_machines[count++] = IMAGE_FILE_MACHINE_ARMNT;
 #elif defined(__aarch64__)
-    if (prefix_type == PREFIX_64BIT)
+    /* WineForge-dev (Luke David 1, 20 Oct 2026): a native arm64 wineserver serving x86-64 clients
+     * that run under Rosetta must present itself exactly as the x86-64 server would, otherwise the
+     * clients take native_machine = ARM64 and look for ARM64 builtins in system32. This is the
+     * default for this build; set WINESERVER_NATIVE_ARM64=1 to get upstream behaviour (ARM64 prefix). */
+    if (prefix_type == PREFIX_64BIT && !getenv( "WINESERVER_NATIVE_ARM64" ))
+    {
+        supported_machines[count++] = IMAGE_FILE_MACHINE_AMD64;
+        supported_machines[count++] = IMAGE_FILE_MACHINE_I386;
+    }
+    else if (prefix_type == PREFIX_64BIT)
     {
         supported_machines[count++] = IMAGE_FILE_MACHINE_ARM64;
         supported_machines[count++] = IMAGE_FILE_MACHINE_I386;

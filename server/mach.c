@@ -85,6 +85,9 @@ static int is_rosetta( void )
             rosetta_status = 0;
         else
             rosetta_status = ret;
+        /* WineForge-dev: a native arm64 server whose clients are Rosetta processes must apply the
+         * Rosetta page-protection tolerance to them, so treat the override as "translated". */
+        if (!getenv( "WINESERVER_NATIVE_ARM64" )) rosetta_status = 1;
 
         did_check = 1;
     }
@@ -257,6 +260,22 @@ void get_thread_context( struct thread *thread, struct context_data *context, un
         mach_set_error( ret );
 done:
     mach_port_deallocate( mach_task_self(), port );
+#elif defined(__aarch64__)
+    /* WineForge-dev (Luke David 1, 21 Oct 2026): a native arm64 server serving x86-64 clients under
+     * Rosetta. Rosetta has no hardware debug registers, and the x86-64 server returns them as zero;
+     * returning no context at all leaves the client's caller-supplied CONTEXT uninitialised, which
+     * GTA V's anti-tamper reads as a hardware breakpoint and crashes on. Report zeros. */
+    if (!(flags & SERVER_CTX_DEBUG_REGISTERS)) return;
+    if (context->machine == IMAGE_FILE_MACHINE_AMD64)
+    {
+        memset( &context->debug.x86_64_regs, 0, sizeof(context->debug.x86_64_regs) );
+        context->flags |= SERVER_CTX_DEBUG_REGISTERS;
+    }
+    else if (context->machine == IMAGE_FILE_MACHINE_I386)
+    {
+        memset( &context->debug.i386_regs, 0, sizeof(context->debug.i386_regs) );
+        context->flags |= SERVER_CTX_DEBUG_REGISTERS;
+    }
 #endif
 }
 
@@ -356,6 +375,10 @@ void set_thread_context( struct thread *thread, const struct context_data *conte
         mach_set_error( ret );
 done:
     mach_port_deallocate( mach_task_self(), port );
+#elif defined(__aarch64__)
+    /* WineForge-dev: no hardware debug registers under Rosetta; accept and ignore, as the x86-64
+     * server effectively does there. */
+    (void)thread; (void)context; (void)flags;
 #endif
 }
 
