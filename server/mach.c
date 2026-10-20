@@ -24,6 +24,7 @@
 #include <assert.h>
 #include <errno.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <sys/types.h>
@@ -85,6 +86,8 @@ static int is_rosetta( void )
             rosetta_status = 0;
         else
             rosetta_status = ret;
+        /* a native server whose clients run under Rosetta needs the same tolerance */
+        if (serves_rosetta_clients()) rosetta_status = 1;
 
         did_check = 1;
     }
@@ -257,6 +260,20 @@ void get_thread_context( struct thread *thread, struct context_data *context, un
         mach_set_error( ret );
 done:
     mach_port_deallocate( mach_task_self(), port );
+#elif defined(__aarch64__)
+    /* x86 clients under Rosetta have no hardware debug registers; an x86-64 server reports them as
+     * zero, and returning nothing here would leave the caller's CONTEXT uninitialised. */
+    if (!(flags & SERVER_CTX_DEBUG_REGISTERS)) return;
+    if (context->machine == IMAGE_FILE_MACHINE_AMD64)
+    {
+        memset( &context->debug.x86_64_regs, 0, sizeof(context->debug.x86_64_regs) );
+        context->flags |= SERVER_CTX_DEBUG_REGISTERS;
+    }
+    else if (context->machine == IMAGE_FILE_MACHINE_I386)
+    {
+        memset( &context->debug.i386_regs, 0, sizeof(context->debug.i386_regs) );
+        context->flags |= SERVER_CTX_DEBUG_REGISTERS;
+    }
 #endif
 }
 
@@ -356,6 +373,9 @@ void set_thread_context( struct thread *thread, const struct context_data *conte
         mach_set_error( ret );
 done:
     mach_port_deallocate( mach_task_self(), port );
+#elif defined(__aarch64__)
+    /* no hardware debug registers for x86 clients under Rosetta: accept and ignore */
+    (void)thread; (void)context; (void)flags;
 #endif
 }
 
@@ -546,3 +566,20 @@ out:
 }
 
 #endif  /* USE_MACH */
+
+/* WINESERVER_ROSETTA_CLIENTS=1: this native arm64 macOS server serves x86-64 clients running under
+ * Rosetta. Off by default, in which case the server behaves exactly as upstream. */
+int serves_rosetta_clients( void )
+{
+#if defined(__APPLE__) && defined(__aarch64__)
+    static int status = -1;
+    if (status < 0)
+    {
+        const char *env = getenv( "WINESERVER_ROSETTA_CLIENTS" );
+        status = env && *env && *env != '0';
+    }
+    return status;
+#else
+    return 0;
+#endif
+}

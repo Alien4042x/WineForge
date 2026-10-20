@@ -1811,7 +1811,14 @@ static void init_supported_machines(void)
 #elif defined(__arm__)
     if (prefix_type == PREFIX_32BIT) supported_machines[count++] = IMAGE_FILE_MACHINE_ARMNT;
 #elif defined(__aarch64__)
-    if (prefix_type == PREFIX_64BIT)
+    if (prefix_type == PREFIX_64BIT && serves_rosetta_clients())
+    {
+        /* the clients are x86-64 processes under Rosetta: present the machine list an x86-64
+         * server would, so that they keep native_machine = AMD64 and their x86-64 builtins */
+        supported_machines[count++] = IMAGE_FILE_MACHINE_AMD64;
+        supported_machines[count++] = IMAGE_FILE_MACHINE_I386;
+    }
+    else if (prefix_type == PREFIX_64BIT)
     {
         supported_machines[count++] = IMAGE_FILE_MACHINE_ARM64;
         supported_machines[count++] = IMAGE_FILE_MACHINE_I386;
