@@ -36,8 +36,11 @@
 #include "spatialaudioclient.h"
 
 #include "mmdevapi_private.h"
+#include <math.h>
 
 WINE_DEFAULT_DEBUG_CHANNEL(mmdevapi);
+
+static BOOL static_object_direction(AudioObjectType type, float *az, float *el);
 
 static UINT32 AudioObjectType_to_index(AudioObjectType type)
 {
@@ -93,7 +96,22 @@ struct SpatialAudioObjectImpl {
 
     float *buf;
 
+    /* dynamic objects (WineForge-dev, Luke David 1, 21 Oct 2026): position in the Windows spatial
+     * frame (x right, y up, z toward the listener, metres), gain, and end-of-stream state */
+    float x, y, z, vol;
+    BOOL ending, inactive;
+
     struct list entry;
+};
+
+#define WINE_SA_MAX_DYNAMIC 32
+#define SA_PI 3.14159265f
+#define WINE_SA_MAX_BED 16
+
+struct sa_bed_speaker {
+    UINT32 chan;      /* channel index in the stream */
+    float az, el;     /* degrees; az 0 = front, positive = right */
+    BOOL top;
 };
 
 struct SpatialAudioStreamImpl {
@@ -112,7 +130,11 @@ struct SpatialAudioStreamImpl {
 
     float *buf;
 
-    UINT32 static_object_map[17];
+    UINT32 dyn_max, dyn_active;
+    /* output speakers of the device mix format (LFE kept separately), used to render every object */
+    struct sa_bed_speaker bed[WINE_SA_MAX_BED];
+    UINT32 bed_count;
+    UINT32 lfe_chan;        /* ~0 if the output has no LFE channel */
 
     struct list objects;
 };
@@ -186,6 +208,8 @@ static ULONG WINAPI SAO_Release(ISpatialAudioObject *iface)
     if(!ref){
         EnterCriticalSection(&This->sa_stream->lock);
         list_remove(&This->entry);
+        if(This->type == AudioObjectType_Dynamic && !This->inactive)
+            This->sa_stream->dyn_active--;
         LeaveCriticalSection(&This->sa_stream->lock);
 
         ISpatialAudioObjectRenderStream_Release(&This->sa_stream->ISpatialAudioObjectRenderStream_iface);
@@ -221,15 +245,23 @@ static HRESULT WINAPI SAO_GetBuffer(ISpatialAudioObject *iface,
 static HRESULT WINAPI SAO_SetEndOfStream(ISpatialAudioObject *iface, UINT32 frames)
 {
     SpatialAudioObjectImpl *This = impl_from_ISpatialAudioObject(iface);
-    FIXME("(%p)->(%u)\n", This, frames);
-    return E_NOTIMPL;
+    TRACE("(%p)->(%u)\n", This, frames);
+    EnterCriticalSection(&This->sa_stream->lock);
+    if(This->sa_stream->update_frames == ~0){
+        LeaveCriticalSection(&This->sa_stream->lock);
+        return SPTLAUDCLNT_E_OUT_OF_ORDER;
+    }
+    This->ending = TRUE;
+    LeaveCriticalSection(&This->sa_stream->lock);
+    return S_OK;
 }
 
 static HRESULT WINAPI SAO_IsActive(ISpatialAudioObject *iface, BOOL *active)
 {
     SpatialAudioObjectImpl *This = impl_from_ISpatialAudioObject(iface);
-    FIXME("(%p)->(%p)\n", This, active);
-    return E_NOTIMPL;
+    TRACE("(%p)->(%p)\n", This, active);
+    *active = !This->inactive;
+    return S_OK;
 }
 
 static HRESULT WINAPI SAO_GetAudioObjectType(ISpatialAudioObject *iface,
@@ -248,15 +280,31 @@ static HRESULT WINAPI SAO_SetPosition(ISpatialAudioObject *iface, float x,
         float y, float z)
 {
     SpatialAudioObjectImpl *This = impl_from_ISpatialAudioObject(iface);
-    FIXME("(%p)->(%f, %f, %f)\n", This, x, y, z);
-    return E_NOTIMPL;
+    TRACE("(%p)->(%f, %f, %f)\n", This, x, y, z);
+    if(This->type != AudioObjectType_Dynamic)
+        return SPTLAUDCLNT_E_PROPERTY_NOT_SUPPORTED;
+    EnterCriticalSection(&This->sa_stream->lock);
+    if(This->sa_stream->update_frames == ~0){
+        LeaveCriticalSection(&This->sa_stream->lock);
+        return SPTLAUDCLNT_E_OUT_OF_ORDER;
+    }
+    This->x = x; This->y = y; This->z = z;
+    LeaveCriticalSection(&This->sa_stream->lock);
+    return S_OK;
 }
 
 static HRESULT WINAPI SAO_SetVolume(ISpatialAudioObject *iface, float vol)
 {
     SpatialAudioObjectImpl *This = impl_from_ISpatialAudioObject(iface);
-    FIXME("(%p)->(%f)\n", This, vol);
-    return E_NOTIMPL;
+    TRACE("(%p)->(%f)\n", This, vol);
+    EnterCriticalSection(&This->sa_stream->lock);
+    if(This->sa_stream->update_frames == ~0){
+        LeaveCriticalSection(&This->sa_stream->lock);
+        return SPTLAUDCLNT_E_OUT_OF_ORDER;
+    }
+    This->vol = vol;
+    LeaveCriticalSection(&This->sa_stream->lock);
+    return S_OK;
 }
 
 static ISpatialAudioObjectVtbl ISpatialAudioObject_vtbl = {
@@ -330,9 +378,11 @@ static HRESULT WINAPI SAORS_GetAvailableDynamicObjectCount(
         ISpatialAudioObjectRenderStream *iface, UINT32 *count)
 {
     SpatialAudioStreamImpl *This = impl_from_ISpatialAudioObjectRenderStream(iface);
-    FIXME("(%p)->(%p)\n", This, count);
+    TRACE("(%p)->(%p)\n", This, count);
 
-    *count = 0;
+    EnterCriticalSection(&This->lock);
+    *count = This->dyn_max - This->dyn_active;
+    LeaveCriticalSection(&This->lock);
     return S_OK;
 }
 
@@ -425,7 +475,7 @@ static HRESULT WINAPI SAORS_BeginUpdatingAudioObjects(ISpatialAudioObjectRenderS
         FIXME("Zero frame update.\n");
     }
 
-    *dyn_count = 0;
+    *dyn_count = This->dyn_max - This->dyn_active;
     *frames = This->update_frames;
 
     LeaveCriticalSection(&This->lock);
@@ -433,20 +483,93 @@ static HRESULT WINAPI SAORS_BeginUpdatingAudioObjects(ISpatialAudioObjectRenderS
     return S_OK;
 }
 
-static void mix_static_object(SpatialAudioStreamImpl *stream, SpatialAudioObjectImpl *object)
+/* gain of each bed speaker for a source direction: constant-power pan between the two speakers of
+ * the nearest ring (ground or top) that bracket the source azimuth */
+static void direction_gains(SpatialAudioStreamImpl *stream, float az, float el, float vol, float *gains)
 {
-    float *in = object->buf, *out;
-    UINT32 i;
-    if(object->static_idx == ~0 ||
-            stream->static_object_map[object->static_idx] == ~0){
-        WARN("Got unmapped static object?! Not mixing. Type: 0x%x\n", object->type);
-        return;
+    UINT32 i, best_l = ~0, best_r = ~0;
+    float dl = 1e9f, dr = 1e9f, d, frac;
+    BOOL want_top;
+
+    for(i = 0; i < stream->bed_count; ++i) gains[i] = 0.f;
+    if(!stream->bed_count) return;
+
+    want_top = el > 30.f;
+
+    for(;;){
+        /* nearest speaker to the left of (or at) the azimuth, and nearest to the right, on the ring */
+        for(i = 0; i < stream->bed_count; ++i){
+            if(stream->bed[i].top != want_top) continue;
+            d = stream->bed[i].az - az;
+            while(d > 180.f) d -= 360.f;
+            while(d < -180.f) d += 360.f;
+            if(d <= 0.f && -d < dl){ dl = -d; best_l = i; }
+            if(d >= 0.f && d < dr){ dr = d; best_r = i; }
+        }
+        if(best_l != ~0 || best_r != ~0) break;
+        if(!want_top) return;                            /* no ground ring at all */
+        want_top = FALSE;                                /* no top ring: use the ground ring */
     }
-    out = stream->buf + stream->static_object_map[object->static_idx];
-    for(i = 0; i < stream->update_frames; ++i){
-        *out += *in;
-        ++in;
-        out += stream->stream_fmtex.Format.nChannels;
+    if(best_l == ~0) best_l = best_r;
+    if(best_r == ~0) best_r = best_l;
+
+    if(best_l == best_r){
+        gains[best_l] = vol;
+    }else{
+        /* constant-power pan across the gap between the two bracketing speakers */
+        frac = (dl + dr) > 0.f ? dl / (dl + dr) : 0.5f;
+        gains[best_l] = cosf(frac * SA_PI / 2.f) * vol;
+        gains[best_r] = sinf(frac * SA_PI / 2.f) * vol;
+        /* a wide gap (a stereo-only bed with a rear source) gets a touch of attenuation */
+        if(dl + dr > 120.f){
+            gains[best_l] *= 0.8f;
+            gains[best_r] *= 0.8f;
+        }
+    }
+}
+
+static void mix_object(SpatialAudioStreamImpl *stream, SpatialAudioObjectImpl *object)
+{
+    float gains[WINE_SA_MAX_BED];
+    float *in = object->buf, *out = stream->buf;
+    UINT32 i, s, nch = stream->stream_fmtex.Format.nChannels;
+    float az, el;
+
+    if(object->inactive) return;
+
+    if(object->type == AudioObjectType_LowFrequency){
+        /* to the output LFE if there is one, otherwise quietly into the ground speakers */
+        if(stream->lfe_chan != ~0){
+            out = stream->buf + stream->lfe_chan;
+            for(i = 0; i < stream->update_frames; ++i){ *out += in[i] * object->vol; out += nch; }
+            return;
+        }
+        for(s = 0; s < stream->bed_count; ++s) gains[s] = stream->bed[s].top ? 0.f : 0.5f * object->vol;
+    }else if(object->type == AudioObjectType_Dynamic){
+        float x = object->x, y = object->y, z = object->z, horiz = sqrtf(x * x + z * z);
+        if(horiz < 1e-4f && fabsf(y) < 1e-4f){
+            /* at the listener: everywhere at once */
+            float sum = 0.f;
+            for(s = 0; s < stream->bed_count; ++s){ gains[s] = stream->bed[s].top ? 0.f : 1.f; sum += gains[s] * gains[s]; }
+            if(sum > 0.f) for(s = 0; s < stream->bed_count; ++s) gains[s] *= object->vol / sqrtf(sum);
+        }else{
+            az = atan2f(x, -z) * (180.f / SA_PI);           /* 0 front, +90 right, +-180 behind */
+            el = atan2f(y, horiz) * (180.f / SA_PI);
+            direction_gains(stream, az, el, object->vol, gains);
+        }
+    }else{
+        if(!static_object_direction(object->type, &az, &el)) return;
+        direction_gains(stream, az, el, object->vol, gains);
+    }
+
+    for(s = 0; s < stream->bed_count; ++s){
+        float g = gains[s];
+        if(g == 0.f) continue;
+        out = stream->buf + stream->bed[s].chan;
+        for(i = 0; i < stream->update_frames; ++i){
+            *out += in[i] * g;
+            out += nch;
+        }
     }
 }
 
@@ -467,10 +590,12 @@ static HRESULT WINAPI SAORS_EndUpdatingAudioObjects(ISpatialAudioObjectRenderStr
 
     if(This->update_frames > 0){
         LIST_FOR_EACH_ENTRY(object, &This->objects, SpatialAudioObjectImpl, entry){
-            if(object->type != AudioObjectType_Dynamic)
-                mix_static_object(This, object);
-            else
-                WARN("Don't know how to mix dynamic object yet. %p\n", object);
+            mix_object(This, object);
+            if(object->ending && !object->inactive){
+                object->inactive = TRUE;
+                object->ending = FALSE;
+                if(object->type == AudioObjectType_Dynamic) This->dyn_active--;
+            }
         }
 
         hr = IAudioRenderClient_ReleaseBuffer(This->render, This->update_frames, 0);
@@ -493,8 +618,28 @@ static HRESULT WINAPI SAORS_ActivateSpatialAudioObject(ISpatialAudioObjectRender
 
     TRACE("(%p)->(0x%x, %p)\n", This, type, object);
 
-    if(type == AudioObjectType_Dynamic)
-        return SPTLAUDCLNT_E_NO_MORE_OBJECTS;
+    if(type == AudioObjectType_Dynamic){
+        EnterCriticalSection(&This->lock);
+        if(This->dyn_active >= This->dyn_max){
+            LeaveCriticalSection(&This->lock);
+            return SPTLAUDCLNT_E_NO_MORE_OBJECTS;
+        }
+        obj = calloc(1, sizeof(*obj));
+        obj->ISpatialAudioObject_iface.lpVtbl = &ISpatialAudioObject_vtbl;
+        obj->ref = 1;
+        obj->type = type;
+        obj->static_idx = ~0;
+        obj->vol = 1.f;
+        obj->z = -1.f;          /* straight ahead until the app positions it */
+        obj->sa_stream = This;
+        SAORS_AddRef(&This->ISpatialAudioObjectRenderStream_iface);
+        obj->buf = calloc(This->period_frames, This->sa_client->object_fmtex.Format.nBlockAlign);
+        list_add_tail(&This->objects, &obj->entry);
+        This->dyn_active++;
+        LeaveCriticalSection(&This->lock);
+        *object = &obj->ISpatialAudioObject_iface;
+        return S_OK;
+    }
 
     if(type & ~This->params.StaticObjectTypeMask)
         return SPTLAUDCLNT_E_STATIC_OBJECT_NOT_AVAILABLE;
@@ -514,7 +659,9 @@ static HRESULT WINAPI SAORS_ActivateSpatialAudioObject(ISpatialAudioObjectRender
     }else{
         obj->static_idx = AudioObjectType_to_index(type);
     }
+    obj->z = -1.f;
 
+    obj->vol = 1.f;
     obj->sa_stream = This;
     SAORS_AddRef(&This->ISpatialAudioObjectRenderStream_iface);
 
@@ -592,25 +739,40 @@ static HRESULT WINAPI SAC_GetStaticObjectPosition(ISpatialAudioClient *iface,
         AudioObjectType type, float *x, float *y, float *z)
 {
     SpatialAudioImpl *This = impl_from_ISpatialAudioClient(iface);
-    FIXME("(%p)->(0x%x, %p, %p, %p)\n", This, type, x, y, z);
-    return E_NOTIMPL;
+    float az, el;
+
+    TRACE("(%p)->(0x%x, %p, %p, %p)\n", This, type, x, y, z);
+
+    if(!static_object_direction(type, &az, &el))
+        return E_INVALIDARG;
+    az *= SA_PI / 180.f;
+    el *= SA_PI / 180.f;
+    *x = sinf(az) * cosf(el);
+    *y = sinf(el);
+    *z = -cosf(az) * cosf(el);
+    return S_OK;
 }
 
 static HRESULT WINAPI SAC_GetNativeStaticObjectTypeMask(ISpatialAudioClient *iface,
         AudioObjectType *mask)
 {
     SpatialAudioImpl *This = impl_from_ISpatialAudioClient(iface);
-    FIXME("(%p)->(%p)\n", This, mask);
-    return E_NOTIMPL;
+    TRACE("(%p)->(%p)\n", This, mask);
+    /* the 7.1.4 bed that Windows Sonic for Headphones offers */
+    *mask = AudioObjectType_FrontLeft | AudioObjectType_FrontRight | AudioObjectType_FrontCenter |
+            AudioObjectType_LowFrequency | AudioObjectType_SideLeft | AudioObjectType_SideRight |
+            AudioObjectType_BackLeft | AudioObjectType_BackRight | AudioObjectType_TopFrontLeft |
+            AudioObjectType_TopFrontRight | AudioObjectType_TopBackLeft | AudioObjectType_TopBackRight;
+    return S_OK;
 }
 
 static HRESULT WINAPI SAC_GetMaxDynamicObjectCount(ISpatialAudioClient *iface,
         UINT32 *value)
 {
     SpatialAudioImpl *This = impl_from_ISpatialAudioClient(iface);
-    FIXME("(%p)->(%p)\n", This, value);
+    TRACE("(%p)->(%p)\n", This, value);
 
-    *value = 0;
+    *value = WINE_SA_MAX_DYNAMIC;
 
     return S_OK;
 }
@@ -632,11 +794,16 @@ static HRESULT WINAPI SAC_GetMaxFrameCount(ISpatialAudioClient *iface,
         const WAVEFORMATEX *format, UINT32 *count)
 {
     SpatialAudioImpl *This = impl_from_ISpatialAudioClient(iface);
-
-    /* FIXME: should get device period from the device */
-    static const REFERENCE_TIME period = 100000;
+    REFERENCE_TIME period = 100000;
+    IAudioClient *client;
 
     TRACE("(%p)->(%p, %p)\n", This, format, count);
+
+    if(SUCCEEDED(IMMDevice_Activate(This->mmdev, &IID_IAudioClient, CLSCTX_INPROC_SERVER, NULL, (void**)&client))){
+        if(FAILED(IAudioClient_GetDevicePeriod(client, &period, NULL)))
+            period = 100000;
+        IAudioClient_Release(client);
+    }
 
     *count = MulDiv(period, format->nSamplesPerSec, 10000000);
 
@@ -677,33 +844,53 @@ static WAVEFORMATEX *clone_fmtex(const WAVEFORMATEX *src)
     return r;
 }
 
-static void static_mask_to_channels(AudioObjectType static_mask, WORD *count, DWORD *mask, UINT32 *map)
+static BOOL static_object_direction(AudioObjectType type, float *az, float *el)
 {
-    UINT32 out_chan = 0, map_idx = 0;
-    *count = 0;
-    *mask = 0;
-#define CONVERT_MASK(f, t) \
-    if(static_mask & f){ \
-        *count += 1; \
-        *mask |= t; \
-        map[map_idx++] = out_chan++; \
-        TRACE("mapping 0x%x to %u\n", f, out_chan - 1); \
-    }else{ \
-        map[map_idx++] = ~0; \
+    switch(type){
+    case AudioObjectType_FrontLeft:     *az = -30.f;  *el = 0.f;  return TRUE;
+    case AudioObjectType_FrontRight:    *az = 30.f;   *el = 0.f;  return TRUE;
+    case AudioObjectType_FrontCenter:   *az = 0.f;    *el = 0.f;  return TRUE;
+    case AudioObjectType_SideLeft:      *az = -90.f;  *el = 0.f;  return TRUE;
+    case AudioObjectType_SideRight:     *az = 90.f;   *el = 0.f;  return TRUE;
+    case AudioObjectType_BackLeft:      *az = -135.f; *el = 0.f;  return TRUE;
+    case AudioObjectType_BackRight:     *az = 135.f;  *el = 0.f;  return TRUE;
+    case AudioObjectType_BackCenter:    *az = 180.f;  *el = 0.f;  return TRUE;
+    case AudioObjectType_TopFrontLeft:  *az = -45.f;  *el = 45.f; return TRUE;
+    case AudioObjectType_TopFrontRight: *az = 45.f;   *el = 45.f; return TRUE;
+    case AudioObjectType_TopBackLeft:   *az = -135.f; *el = 45.f; return TRUE;
+    case AudioObjectType_TopBackRight:  *az = 135.f;  *el = 45.f; return TRUE;
+    case AudioObjectType_LowFrequency:  *az = 0.f;    *el = 0.f;  return TRUE;
+    case AudioObjectType_BottomFrontLeft:  *az = -45.f;  *el = -45.f; return TRUE;
+    case AudioObjectType_BottomFrontRight: *az = 45.f;   *el = -45.f; return TRUE;
+    case AudioObjectType_BottomBackLeft:   *az = -135.f; *el = -45.f; return TRUE;
+    case AudioObjectType_BottomBackRight:  *az = 135.f;  *el = -45.f; return TRUE;
+    default: return FALSE;
     }
-    CONVERT_MASK(AudioObjectType_FrontLeft, SPEAKER_FRONT_LEFT);
-    CONVERT_MASK(AudioObjectType_FrontRight, SPEAKER_FRONT_RIGHT);
-    CONVERT_MASK(AudioObjectType_FrontCenter, SPEAKER_FRONT_CENTER);
-    CONVERT_MASK(AudioObjectType_LowFrequency, SPEAKER_LOW_FREQUENCY);
-    CONVERT_MASK(AudioObjectType_SideLeft, SPEAKER_SIDE_LEFT);
-    CONVERT_MASK(AudioObjectType_SideRight, SPEAKER_SIDE_RIGHT);
-    CONVERT_MASK(AudioObjectType_BackLeft, SPEAKER_BACK_LEFT);
-    CONVERT_MASK(AudioObjectType_BackRight, SPEAKER_BACK_RIGHT);
-    CONVERT_MASK(AudioObjectType_TopFrontLeft, SPEAKER_TOP_FRONT_LEFT);
-    CONVERT_MASK(AudioObjectType_TopFrontRight, SPEAKER_TOP_FRONT_RIGHT);
-    CONVERT_MASK(AudioObjectType_TopBackLeft, SPEAKER_TOP_BACK_LEFT);
-    CONVERT_MASK(AudioObjectType_TopBackRight, SPEAKER_TOP_BACK_RIGHT);
-    CONVERT_MASK(AudioObjectType_BackCenter, SPEAKER_BACK_CENTER);
+}
+
+/* direction of an output speaker given its KSAUDIO SPEAKER_* bit */
+static BOOL speaker_direction(DWORD bit, float *az, float *el)
+{
+    switch(bit){
+    case SPEAKER_FRONT_LEFT:            *az = -30.f;  *el = 0.f;  return TRUE;
+    case SPEAKER_FRONT_RIGHT:           *az = 30.f;   *el = 0.f;  return TRUE;
+    case SPEAKER_FRONT_CENTER:          *az = 0.f;    *el = 0.f;  return TRUE;
+    case SPEAKER_BACK_LEFT:             *az = -135.f; *el = 0.f;  return TRUE;
+    case SPEAKER_BACK_RIGHT:            *az = 135.f;  *el = 0.f;  return TRUE;
+    case SPEAKER_FRONT_LEFT_OF_CENTER:  *az = -15.f;  *el = 0.f;  return TRUE;
+    case SPEAKER_FRONT_RIGHT_OF_CENTER: *az = 15.f;   *el = 0.f;  return TRUE;
+    case SPEAKER_BACK_CENTER:           *az = 180.f;  *el = 0.f;  return TRUE;
+    case SPEAKER_SIDE_LEFT:             *az = -90.f;  *el = 0.f;  return TRUE;
+    case SPEAKER_SIDE_RIGHT:            *az = 90.f;   *el = 0.f;  return TRUE;
+    case SPEAKER_TOP_CENTER:            *az = 0.f;    *el = 90.f; return TRUE;
+    case SPEAKER_TOP_FRONT_LEFT:        *az = -45.f;  *el = 45.f; return TRUE;
+    case SPEAKER_TOP_FRONT_CENTER:      *az = 0.f;    *el = 45.f; return TRUE;
+    case SPEAKER_TOP_FRONT_RIGHT:       *az = 45.f;   *el = 45.f; return TRUE;
+    case SPEAKER_TOP_BACK_LEFT:         *az = -135.f; *el = 45.f; return TRUE;
+    case SPEAKER_TOP_BACK_CENTER:       *az = 180.f;  *el = 45.f; return TRUE;
+    case SPEAKER_TOP_BACK_RIGHT:        *az = 135.f;  *el = 45.f; return TRUE;
+    default: return FALSE;
+    }
 }
 
 static HRESULT activate_stream(SpatialAudioStreamImpl *stream)
@@ -711,6 +898,7 @@ static HRESULT activate_stream(SpatialAudioStreamImpl *stream)
     WAVEFORMATEXTENSIBLE *object_fmtex = (WAVEFORMATEXTENSIBLE *)stream->params.ObjectFormat;
     HRESULT hr;
     REFERENCE_TIME period;
+    WAVEFORMATEX *mix;
 
     if(!(object_fmtex->Format.wFormatTag == WAVE_FORMAT_IEEE_FLOAT ||
                 (object_fmtex->Format.wFormatTag == WAVE_FORMAT_EXTENSIBLE &&
@@ -733,21 +921,80 @@ static HRESULT activate_stream(SpatialAudioStreamImpl *stream)
         return hr;
     }
 
-    stream->stream_fmtex.Format.wFormatTag = WAVE_FORMAT_EXTENSIBLE;
-    static_mask_to_channels(stream->params.StaticObjectTypeMask,
-            &stream->stream_fmtex.Format.nChannels, &stream->stream_fmtex.dwChannelMask,
-            stream->static_object_map);
-    stream->stream_fmtex.Format.nSamplesPerSec = stream->params.ObjectFormat->nSamplesPerSec;
-    stream->stream_fmtex.Format.wBitsPerSample = stream->params.ObjectFormat->wBitsPerSample;
-    stream->stream_fmtex.Format.nBlockAlign = (stream->stream_fmtex.Format.nChannels * stream->stream_fmtex.Format.wBitsPerSample) / 8;
-    stream->stream_fmtex.Format.nAvgBytesPerSec = stream->stream_fmtex.Format.nSamplesPerSec * stream->stream_fmtex.Format.nBlockAlign;
-    stream->stream_fmtex.Format.cbSize = sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX);
-    stream->stream_fmtex.Samples.wValidBitsPerSample = stream->stream_fmtex.Format.wBitsPerSample;
-    stream->stream_fmtex.SubFormat = KSDATAFORMAT_SUBTYPE_IEEE_FLOAT;
+    stream->dyn_max = min(stream->params.MaxDynamicObjectCount, WINE_SA_MAX_DYNAMIC);
+
+    /* Render everything ourselves into the device's own channel layout (WineForge-dev, Luke David 1,
+     * 21 Oct 2026). Upstream opened a stream with one channel per static bed object and left the
+     * fold-down to the audio driver; on macOS CoreAudio dropped everything but the first two
+     * channels of that stream, which is why dialogue (front centre) went missing. */
+    hr = IAudioClient_GetMixFormat(stream->client, &mix);
+    if(FAILED(hr)){
+        WARN("GetMixFormat failed: %08lx\n", hr);
+        IAudioClient_Release(stream->client);
+        return hr;
+    }
+    if(mix->wFormatTag == WAVE_FORMAT_EXTENSIBLE){
+        memcpy(&stream->stream_fmtex, mix, sizeof(WAVEFORMATEXTENSIBLE));
+    }else{
+        memcpy(&stream->stream_fmtex.Format, mix, sizeof(WAVEFORMATEX));
+        stream->stream_fmtex.Format.wFormatTag = WAVE_FORMAT_EXTENSIBLE;
+        stream->stream_fmtex.Format.cbSize = sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX);
+        stream->stream_fmtex.Samples.wValidBitsPerSample = mix->wBitsPerSample;
+        stream->stream_fmtex.dwChannelMask = mix->nChannels == 1 ? SPEAKER_FRONT_CENTER : KSAUDIO_SPEAKER_STEREO;
+        stream->stream_fmtex.SubFormat = mix->wFormatTag == WAVE_FORMAT_IEEE_FLOAT ? KSDATAFORMAT_SUBTYPE_IEEE_FLOAT : KSDATAFORMAT_SUBTYPE_PCM;
+    }
+    CoTaskMemFree(mix);
+    if(!IsEqualGUID(&stream->stream_fmtex.SubFormat, &KSDATAFORMAT_SUBTYPE_IEEE_FLOAT) ||
+            stream->stream_fmtex.Format.wBitsPerSample != 32){
+        /* ask for float at the mix rate; mmdevapi converts (AUTOCONVERTPCM) */
+        stream->stream_fmtex.SubFormat = KSDATAFORMAT_SUBTYPE_IEEE_FLOAT;
+        stream->stream_fmtex.Format.wBitsPerSample = 32;
+        stream->stream_fmtex.Samples.wValidBitsPerSample = 32;
+        stream->stream_fmtex.Format.nBlockAlign = (stream->stream_fmtex.Format.nChannels * 32) / 8;
+        stream->stream_fmtex.Format.nAvgBytesPerSec = stream->stream_fmtex.Format.nSamplesPerSec * stream->stream_fmtex.Format.nBlockAlign;
+    }
+    if(!stream->stream_fmtex.dwChannelMask)
+        stream->stream_fmtex.dwChannelMask = stream->stream_fmtex.Format.nChannels == 1 ? SPEAKER_FRONT_CENTER : KSAUDIO_SPEAKER_STEREO;
+
+    /* speaker table for the panner, in stream channel order (LFE kept aside) */
+    stream->bed_count = 0;
+    stream->lfe_chan = ~0;
+    {
+        UINT32 chan = 0;
+        DWORD bit;
+        for(bit = 1; bit && chan < stream->stream_fmtex.Format.nChannels; bit <<= 1){
+            float az, el;
+            if(!(stream->stream_fmtex.dwChannelMask & bit)) continue;
+            if(bit == SPEAKER_LOW_FREQUENCY){
+                stream->lfe_chan = chan++;
+                continue;
+            }
+            if(speaker_direction(bit, &az, &el) && stream->bed_count < WINE_SA_MAX_BED){
+                stream->bed[stream->bed_count].chan = chan;
+                stream->bed[stream->bed_count].az = az;
+                stream->bed[stream->bed_count].el = el;
+                stream->bed[stream->bed_count].top = el > 30.f;
+                stream->bed_count++;
+            }
+            chan++;
+        }
+        /* a mask with fewer bits than channels (or unknown bits): treat the rest as a stereo pair */
+        if(!stream->bed_count && stream->stream_fmtex.Format.nChannels >= 2){
+            stream->bed[0].chan = 0; stream->bed[0].az = -30.f; stream->bed[0].el = 0.f; stream->bed[0].top = FALSE;
+            stream->bed[1].chan = 1; stream->bed[1].az = 30.f;  stream->bed[1].el = 0.f; stream->bed[1].top = FALSE;
+            stream->bed_count = 2;
+        }else if(!stream->bed_count){
+            stream->bed[0].chan = 0; stream->bed[0].az = 0.f; stream->bed[0].el = 0.f; stream->bed[0].top = FALSE;
+            stream->bed_count = 1;
+        }
+    }
+    TRACE("output: %u channels, mask 0x%lx, %u panner speakers, lfe %d, %u dynamic objects\n",
+          stream->stream_fmtex.Format.nChannels, stream->stream_fmtex.dwChannelMask, stream->bed_count,
+          (int)stream->lfe_chan, stream->dyn_max);
 
     hr = IAudioClient_Initialize(stream->client, AUDCLNT_SHAREMODE_SHARED,
             AUDCLNT_STREAMFLAGS_EVENTCALLBACK | AUDCLNT_STREAMFLAGS_NOPERSIST | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
-            period, 0, &stream->stream_fmtex.Format, NULL);
+            period * 3, 0, &stream->stream_fmtex.Format, NULL);
     if(FAILED(hr)){
         WARN("Initialize failed: %08lx\n", hr);
         IAudioClient_Release(stream->client);
