@@ -301,11 +301,11 @@ WINEWFUSYNC=0
 
 Unsupported waits and sensitive synchronization semantics remain on the Wine server fallback path. Probe and targeted validation have shown good results, but this is not claimed as a guaranteed per-game performance improvement.
 
-## Status
+## Contributing
 
-WineForge 0.6.0.7 uses Wine 11.20. The source has been built and installed. Focused checks of the signed runtime passed for native Steam API access in both architectures and Epic Games Launcher's 20.2.1 to 20.3.5 self-update.
+Contributions are welcome. Please read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
 
-Compatibility remains application-specific. Unsupported games and launchers may still require profiling or targeted compatibility patches.
+WineForge prioritizes upstream compatibility, stability, and small, focused changes. Contributions should explain the underlying problem, follow documented Windows API behavior, and include validation appropriate to their scope and regression risk.
 
 ## License
 
