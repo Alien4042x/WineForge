@@ -88,6 +88,9 @@ static const struct launcher_process_policy launcher_process_policies[] =
     },
 };
 
+/* WineForge-Internal: launcher-compat/steam-cef-single-process-v1. */
+static const WCHAR steam_cef_single_process_args[] = L" --single-process";
+
 static BOOL string_contains_ci( const WCHAR *string, const WCHAR *needle )
 {
     SIZE_T needle_len;
@@ -125,6 +128,10 @@ const WCHAR *get_launcher_process_args( const WCHAR *app_name, const WCHAR *cmd_
             string_contains_ci( cmd_line, policy->excluded_path ) ||
             string_contains_ci( cmd_line, policy->excluded_path_alt ))
             return NULL;
+        if (i == 0 && string_contains_ci( cmd_line, L"--disable-gpu" ) &&
+            !string_contains_ci( cmd_line, L"--type=" ) &&
+            !string_contains_ci( cmd_line, L"--single-process" ))
+            return steam_cef_single_process_args;
         for (j = 0; j < ARRAY_SIZE(policy->blocked_args) && policy->blocked_args[j]; j++)
             if (string_contains_ci( cmd_line, policy->blocked_args[j] )) return NULL;
         return policy->append_args;
