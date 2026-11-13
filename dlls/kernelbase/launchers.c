@@ -89,7 +89,40 @@ static const struct launcher_process_policy launcher_process_policies[] =
 };
 
 /* WineForge-Internal: launcher-compat/steam-cef-single-process-v1. */
-static const WCHAR steam_cef_single_process_args[] = L" --single-process";
+static const WCHAR steam_cef_software_args[] =
+    L" --disable-gpu --disable-gpu-compositing --no-sandbox";
+static const WCHAR steam_cef_single_process_args[] =
+    L" --disable-gpu --disable-gpu-compositing --single-process --no-sandbox";
+
+static BOOL command_line_has_switch_ci( const WCHAR *command, const WCHAR *option )
+{
+    SIZE_T length = lstrlenW( option );
+
+    while (command && *command)
+    {
+        const WCHAR *start, *end;
+        unsigned int backslashes = 0;
+        BOOL quoted = FALSE;
+
+        while (*command == ' ' || *command == '\t') command++;
+        start = command;
+        for (; *command; command++)
+        {
+            if (*command == '\\')
+            {
+                backslashes++;
+                continue;
+            }
+            if (*command == '"' && !(backslashes & 1)) quoted = !quoted;
+            else if (!quoted && (*command == ' ' || *command == '\t')) break;
+            backslashes = 0;
+        }
+        end = command;
+        if (end - start >= 2 && *start == '"' && end[-1] == '"') start++, end--;
+        if ((SIZE_T)(end - start) == length && !wcsnicmp( start, option, length )) return TRUE;
+    }
+    return FALSE;
+}
 
 static BOOL string_contains_ci( const WCHAR *string, const WCHAR *needle )
 {
@@ -128,10 +161,17 @@ const WCHAR *get_launcher_process_args( const WCHAR *app_name, const WCHAR *cmd_
             string_contains_ci( cmd_line, policy->excluded_path ) ||
             string_contains_ci( cmd_line, policy->excluded_path_alt ))
             return NULL;
-        if (i == 0 && string_contains_ci( cmd_line, L"--disable-gpu" ) &&
-            !string_contains_ci( cmd_line, L"--type=" ) &&
-            !string_contains_ci( cmd_line, L"--single-process" ))
+        if (i == 0 && !string_contains_ci( cmd_line, L"--type=" ))
+        {
+            if (command_line_has_switch_ci( cmd_line, L"--single-process" ))
+            {
+                if (command_line_has_switch_ci( cmd_line, L"--disable-gpu" ) &&
+                    command_line_has_switch_ci( cmd_line, L"--disable-gpu-compositing" ) &&
+                    command_line_has_switch_ci( cmd_line, L"--no-sandbox" )) return NULL;
+                return steam_cef_software_args;
+            }
             return steam_cef_single_process_args;
+        }
         for (j = 0; j < ARRAY_SIZE(policy->blocked_args) && policy->blocked_args[j]; j++)
             if (string_contains_ci( cmd_line, policy->blocked_args[j] )) return NULL;
         return policy->append_args;
