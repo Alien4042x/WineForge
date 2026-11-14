@@ -29,6 +29,7 @@ NTSTATUS wfdxcompat_get_runtime_alias( const WCHAR *name, UNICODE_STRING *nt_nam
  * These callbacks run under the Wine loader lock. */
 void wfdx_launcher_activate( HMODULE d3d11 );
 void *wfdx_launcher_get_import( HMODULE module, const char *name );
+void wfdx_launcher_fixup_imports( HMODULE importer );
 void *wfdx_launcher_get_proc( HMODULE module, const ANSI_STRING *name );
 
 /* WineForge-Internal: wfdxcompat/d3d10-late-device-dispatch-v1. */

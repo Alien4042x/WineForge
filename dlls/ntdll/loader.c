@@ -1812,6 +1812,7 @@ static NTSTATUS process_attach( LDR_DDAG_NODE *node, LPVOID lpReserved )
     /* Call DLL entry point */
     if (status == STATUS_SUCCESS)
     {
+        wfdx_launcher_fixup_imports( wm->ldr.DllBase );
         call_ldr_notifications( LDR_DLL_NOTIFICATION_REASON_LOADED, &wm->ldr );
         status = MODULE_InitDLL( wm, DLL_PROCESS_ATTACH, lpReserved );
         if (status == STATUS_SUCCESS)

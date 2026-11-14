@@ -123,8 +123,10 @@ static HMODULE wfdx_launcher_dxgi;
 static HMODULE wfdx_launcher_companion;
 static void *wfdx_launcher_create_device;
 static void *wfdx_launcher_create_device_and_swapchain;
+static void *wfdx_launcher_original_create_device_and_swapchain;
 static void *wfdx_launcher_dxgi_d3d10_create_device;
 static BOOL wfdx_launcher_interposition_active;
+static UINT wfdx_launcher_flags;
 
 static BOOL wfdx_launcher_path_has_suffix( const UNICODE_STRING *path, const WCHAR *suffix )
 {
@@ -159,7 +161,62 @@ static BOOL wfdx_launcher_env_present( const WCHAR *name_str )
     return status == STATUS_SUCCESS || status == STATUS_BUFFER_TOO_SMALL;
 }
 
-static BOOL wfdx_launcher_process_enabled(void)
+#ifdef _WIN64
+static BOOL wfdx_launcher_d3dmetal_enabled(void)
+{
+    UNICODE_STRING value;
+    NTSTATUS status = get_runtime_env( L"GRAPHICS_BACKEND", 0, &value );
+    BOOL enabled;
+
+    if (status != STATUS_SUCCESS && status != STATUS_VARIABLE_NOT_FOUND) return FALSE;
+    if (!status && !value.Length)
+    {
+        RtlFreeUnicodeString( &value );
+        status = STATUS_VARIABLE_NOT_FOUND;
+    }
+    if (status == STATUS_VARIABLE_NOT_FOUND)
+        status = get_runtime_env( L"ACTIVE_GRAPHICS_BACKEND", 0, &value );
+    if (status) return FALSE;
+    enabled = !wcscmp( value.Buffer, L"d3dmetal" );
+    RtlFreeUnicodeString( &value );
+    return enabled;
+}
+
+static BOOL wfdx_launcher_has_argument( const UNICODE_STRING *line, const WCHAR *expected )
+{
+    const WCHAR *p, *end;
+    size_t length = wcslen( expected );
+
+    if (!line || !line->Buffer || line->Length % sizeof(WCHAR)) return FALSE;
+    p = line->Buffer;
+    end = p + line->Length / sizeof(WCHAR);
+    while (p < end)
+    {
+        const WCHAR *start, *stop;
+        BOOL quoted = FALSE;
+
+        while (p < end && (*p == ' ' || *p == '\t')) ++p;
+        start = p;
+        while (p < end)
+        {
+            if (*p == '"') quoted = !quoted;
+            else if (!quoted && (*p == ' ' || *p == '\t')) break;
+            ++p;
+        }
+        stop = p;
+        if (quoted) return FALSE;
+        if (stop - start >= 2 && *start == '"' && stop[-1] == '"')
+        {
+            ++start;
+            --stop;
+        }
+        if ((size_t)(stop - start) == length && !wcsnicmp( start, expected, length )) return TRUE;
+    }
+    return FALSE;
+}
+#endif
+
+static UINT wfdx_launcher_process_flags(void)
 {
     const UNICODE_STRING *path = &NtCurrentTeb()->Peb->ProcessParameters->ImagePathName;
     BOOL rockstar = wfdx_launcher_path_has_suffix( path,
@@ -167,7 +224,25 @@ static BOOL wfdx_launcher_process_enabled(void)
             wfdx_launcher_path_has_suffix( path,
             L"\\Rockstar Games\\Social Club\\SocialClubHelper.exe" );
 
-    return rockstar && wfdx_launcher_env_present( L"WFDXCOMPAT_RUNTIME_DIR" );
+    if (rockstar)
+        return wfdx_launcher_env_present( L"WFDXCOMPAT_RUNTIME_DIR" ) ?
+                0x00000001 | 0x00000002 | 0x00000004 : 0;
+#ifdef _WIN64
+    if (wfdx_launcher_path_has_suffix( path,
+            L"\\Epic Games\\Launcher\\Portal\\Binaries\\Win64\\EpicGamesLauncher.exe" ))
+    {
+        const UNICODE_STRING *line = &NtCurrentTeb()->Peb->ProcessParameters->CommandLine;
+        BOOL install = wfdx_launcher_has_argument( line, L"-Commandlet=selfupdateinstall" );
+        BOOL clean = wfdx_launcher_has_argument( line, L"-Commandlet=selfupdateclean" );
+
+        if (((install && !clean && wfdx_launcher_has_argument( line, L"-RanAsService" )) ||
+             (clean && !install)) &&
+            wfdx_launcher_d3dmetal_enabled() &&
+            wfdx_launcher_env_present( L"WFDXCOMPAT_RUNTIME_DIR" ))
+            return 0x00000001 | 0x00000008;
+    }
+#endif
+    return 0;
 }
 
 static BOOL wfdx_launcher_export_name( const ANSI_STRING *name, const char *expected )
@@ -195,6 +270,7 @@ void wfdx_launcher_activate( HMODULE d3d11 )
     static const char wrapper_nameA[] = "wfdx_launcher_D3D11CreateDevice";
     static const char wrapper_sc_nameA[] = "wfdx_launcher_D3D11CreateDeviceAndSwapChain";
     static const char wrapper_d3d10_nameA[] = "wfdx_launcher_DXGID3D10CreateDevice";
+    static const char supported_flags_nameA[] = "wfdx_launcher_get_supported_flags";
     UNICODE_STRING companion_name;
     UNICODE_STRING dxgi_name;
     ANSI_STRING name;
@@ -202,13 +278,15 @@ void wfdx_launcher_activate( HMODULE d3d11 )
     void *original_create = NULL, *original_create_sc = NULL;
     void *wrapper_create = NULL, *wrapper_create_sc = NULL;
     void *wrapper_d3d10 = NULL, *init_proc = NULL;
+    void *supported_flags_proc = NULL;
     HMODULE dxgi = NULL;
     BOOL (WINAPI *init)(const struct wfdx_launcher_init *);
+    UINT flags;
     NTSTATUS status;
 
-    if (wfdx_launcher_interposition_active || wfdx_launcher_companion ||
-        !wfdx_launcher_process_enabled())
+    if (wfdx_launcher_interposition_active || wfdx_launcher_companion)
         return;
+    if (!(flags = wfdx_launcher_process_flags())) return;
 
     RtlInitAnsiString( &name, create_nameA );
     if (LdrGetProcedureAddress( d3d11, &name, 0, &original_create ))
@@ -240,6 +318,16 @@ void wfdx_launcher_activate( HMODULE d3d11 )
     }
     if (!status)
     {
+        if (flags & 0x00000008)
+        {
+            RtlInitAnsiString( &name, supported_flags_nameA );
+            status = LdrGetProcedureAddress( companion, &name, 0, &supported_flags_proc );
+            if (!status && !(((UINT (WINAPI *)(void))supported_flags_proc)() & 0x00000008))
+                status = STATUS_NOT_SUPPORTED;
+        }
+    }
+    if (!status)
+    {
         RtlInitUnicodeString( &dxgi_name, dxgi_nameW );
         status = LdrGetDllHandle( NULL, 0, &dxgi_name, &dxgi );
     }
@@ -252,7 +340,7 @@ void wfdx_launcher_activate( HMODULE d3d11 )
     init = init_proc;
     init_data.size = sizeof(init_data);
     init_data.abi_version = 1;
-    init_data.flags = 0x00000001 | 0x00000002 | 0x00000004;
+    init_data.flags = flags;
     init_data.reserved = 0;
     init_data.create_device = original_create;
     init_data.create_device_and_swapchain = original_create_sc;
@@ -267,10 +355,12 @@ void wfdx_launcher_activate( HMODULE d3d11 )
     wfdx_launcher_companion = companion;
     wfdx_launcher_create_device = wrapper_create;
     wfdx_launcher_create_device_and_swapchain = wrapper_create_sc;
+    wfdx_launcher_original_create_device_and_swapchain = original_create_sc;
     wfdx_launcher_dxgi_d3d10_create_device = wrapper_d3d10;
+    wfdx_launcher_flags = flags;
     wfdx_launcher_interposition_active = TRUE;
-    TRACE( "activated Rockstar D3D11 companion %p for canonical backend %p\n",
-            companion, d3d11 );
+    TRACE( "activated D3D11 companion %p for canonical backend %p, flags %#x\n",
+            companion, d3d11, flags );
 }
 
 /* WineForge-Internal: wfdxcompat/d3d10-late-device-dispatch-v1.
@@ -292,10 +382,65 @@ void *WINAPI __wine_get_wfdx_d3d10_create_device(void)
 /* WineForge-Internal: wfdxcompat/launcher-process-interposition-v1. */
 void *wfdx_launcher_get_import( HMODULE module, const char *name )
 {
+    if (wfdx_launcher_interposition_active && (wfdx_launcher_flags & 0x00000008) &&
+        module == wfdx_launcher_d3d11 && !strcmp( name, "D3D11CreateDeviceAndSwapChain" ))
+        return wfdx_launcher_create_device_and_swapchain;
     if (wfdx_launcher_interposition_active && module == wfdx_launcher_dxgi &&
         !strcmp( name, "DXGID3D10CreateDevice" ))
         return wfdx_launcher_dxgi_d3d10_create_device;
     return NULL;
+}
+
+/* Dependencies have attached, but the importing module has not run DllMain.
+ * Imports resolved before companion activation still contain the backend entry. */
+void wfdx_launcher_fixup_imports( HMODULE importer )
+{
+    IMAGE_IMPORT_DESCRIPTOR *imports;
+    IMAGE_NT_HEADERS *header;
+    BYTE *base = (BYTE *)importer;
+    ULONG size, image_size, i;
+
+    if (!wfdx_launcher_interposition_active || !(wfdx_launcher_flags & 0x00000008)) return;
+    if (!(header = RtlImageNtHeader( importer ))) return;
+    image_size = header->OptionalHeader.SizeOfImage;
+    if (!(imports = RtlImageDirectoryEntryToData( importer, TRUE, IMAGE_DIRECTORY_ENTRY_IMPORT, &size )))
+        return;
+    if (size > image_size) return;
+
+    for (i = 0; i < size / sizeof(*imports) && imports[i].Name; ++i)
+    {
+        IMAGE_THUNK_DATA *thunks;
+        ULONG count, j;
+
+        if (imports[i].Name > image_size || image_size - imports[i].Name < sizeof("d3d11.dll") ||
+            strnicmp( (char *)base + imports[i].Name, "d3d11.dll", sizeof("d3d11.dll") ) ||
+            !imports[i].FirstThunk || imports[i].FirstThunk >= image_size)
+            continue;
+        thunks = (IMAGE_THUNK_DATA *)(base + imports[i].FirstThunk);
+        count = (image_size - imports[i].FirstThunk) / sizeof(*thunks);
+        for (j = 0; j < count && thunks[j].u1.Function; ++j)
+        {
+            void *address = &thunks[j].u1.Function;
+            SIZE_T bytes = sizeof(thunks[j].u1.Function);
+            ULONG old_protect, ignored;
+            NTSTATUS status;
+
+            if ((void *)(ULONG_PTR)thunks[j].u1.Function != wfdx_launcher_original_create_device_and_swapchain)
+                continue;
+            status = NtProtectVirtualMemory( NtCurrentProcess(), &address, &bytes, PAGE_READWRITE, &old_protect );
+            if (status)
+            {
+                WARN( "cannot interpose service swapchain import in %p, status %#lx\n", importer, (long)status );
+                continue;
+            }
+            thunks[j].u1.Function = (ULONG_PTR)wfdx_launcher_create_device_and_swapchain;
+            status = NtProtectVirtualMemory( NtCurrentProcess(), &address, &bytes, old_protect, &ignored );
+            if (status)
+                WARN( "cannot restore service import protection in %p, status %#lx\n", importer, (long)status );
+            else
+                TRACE( "interposed service swapchain import in %p at %p\n", importer, &thunks[j] );
+        }
+    }
 }
 
 /* WineForge-Internal: wfdxcompat/launcher-process-interposition-v1. */
