@@ -1,12 +1,12 @@
 # WineForge
 
-![WineForge](https://img.shields.io/badge/WineForge-0.6.0.8-blue)
-![Wine](https://img.shields.io/badge/Wine-11.21-8a2be2)
+![WineForge](https://img.shields.io/badge/WineForge-0.6.0.9-blue)
+![Wine](https://img.shields.io/badge/Wine-11.22-8a2be2)
 ![Platform](https://img.shields.io/badge/platform-macOS-lightgrey)
 ![License](https://img.shields.io/badge/license-LGPL--2.1--or--later-green)
 ![Downloads](https://img.shields.io/github/downloads/Alien4042x/WineForge/total)
 
-WineForge is a macOS-focused Wine 11.21 source tree focused on improving Windows game compatibility through D3DMetal, Rosetta, and launcher compatibility.
+WineForge is a macOS-focused Wine 11.22 source tree focused on improving Windows game compatibility through D3DMetal, Rosetta, and launcher compatibility.
 
 It is built around one idea: keep the Wine side understandable while making the Apple Game Porting Toolkit / D3DMetal runtime path easier to test for Windows games on macOS.
 
@@ -17,7 +17,7 @@ This repository is not upstream Wine, not CrossOver, and not a complete runtime 
 Source identity:
 
 ```text
-wine-11.21 (WineForge 0.6.0.8)
+wine-11.22 (WineForge 0.6.0.9)
 ```
 
 ## Native macOS fullscreen
@@ -85,6 +85,17 @@ See [the Wine-side integration contract](docs/NATIVE_STEAM.md) for build targets
 If installation fails, please report it in the [GitHub issues](https://github.com/Alien4042x/WineForge/issues). Include the full error message or a screenshot, your macOS version and Mac model.
 
 <img width="613" height="326" alt="notproton" src="https://github.com/user-attachments/assets/a4cad1c8-384f-484b-a20a-ecac35bfab92" />
+
+### Steam Game Recording
+
+**We recommend disabling Steam Game Recording when playing through Wine.**
+Open **Steam → Settings → Game Recording** and select **Off / Don't record**.
+Recording in the background can reduce FPS during gameplay.
+
+This recommendation applies both to games launched through WineForge's native
+Steam Play integration and to the Windows Steam client running inside Wine.
+See [Steam's Game Recording FAQ](https://help.steampowered.com/en/faqs/view/23B7-49AD-4A28-9590)
+for the recording settings and performance considerations.
 
 ## Build Notes
 
@@ -296,7 +307,7 @@ Ubisoft Connect is supported for installation, sign-in, library, download, and g
 
 ## USync 6
 
-USync 6 is WineForge's opt-in userspace synchronization backend for macOS,
+[USync 6](https://github.com/Alien4042x/USync) is WineForge's opt-in userspace synchronization backend for macOS,
 succeeding WFUSync. It keeps supported synchronization state in shared memory
 and uses atomic operations for fast acquisition.
 

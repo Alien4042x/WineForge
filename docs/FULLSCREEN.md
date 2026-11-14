@@ -36,7 +36,7 @@ does not change the selected graphics backend or enable Game Mode.
 The retained Wine 11.20 reference passed focused fullscreen lifecycle,
 presentation-policy, cursor and unavailable-API controls. Game observations
 apply to their recorded runtime combinations. They do not establish runtime
-acceptance for the Wine 11.21 update or every game.
+acceptance for other runtime combinations or every game.
 
 The fallback was checked with the new API path disabled. An older macOS system
 has not been used for a runtime test.
