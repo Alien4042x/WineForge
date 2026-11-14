@@ -1272,7 +1272,8 @@ static NTSTATUS find_builtin_dll( UNICODE_STRING *nt_name, ANSI_STRING *exp_name
     TRACE( "looking for %s for file %s\n", debugstr_a(file + pos + 1), debugstr_us(nt_name) );
 
 #if defined(__APPLE__) && defined(__x86_64__)
-    if ((d3dmetal_graphics_backend_enabled() || cef_software_policy_enabled()) &&
+    if ((d3dmetal_graphics_backend_enabled() || dxmt_graphics_backend_enabled() ||
+         cef_software_policy_enabled()) &&
         steam_cef_native_vulkan_loader( nt_name, file + pos + 1 ))
     {
         TRACE( "Steam frontend using native CEF Vulkan loader for %s\n", debugstr_us(nt_name) );
