@@ -1,5 +1,6 @@
 /*
  * Ntdll Unix private interface
+ * WineForge-Internal: usync-v6.
  *
  * Copyright (C) 2020 Alexandre Julliard
  *
@@ -110,6 +111,7 @@ static inline ULONG_PTR get_system_affinity_mask(void)
 
 /* per-thread data for the Unix side, stored at the bottom of the signal stack */
 
+
 struct thread_data
 {
     TEB         *teb;               /* TEB */
@@ -127,6 +129,8 @@ struct thread_data
     void        *param;             /* thread entry point parameter */
     struct list  entry;             /* entry in TEB list */
     char         debug_info[0x800]; /* debug_info structure */
+    volatile sig_atomic_t usync_lock_depth;
+    volatile sig_atomic_t usync_pending_signals;
     char         signal_stack[];    /* signal stack */
     /* char kernel_stack[] */
 };
@@ -137,6 +141,8 @@ static inline struct thread_data *get_thread_data(void)
 {
     return pthread_getspecific( thread_data_key );
 }
+
+extern BOOL usync_defer_signal( struct thread_data *data, int signal );
 
 /* thread private data, stored in NtCurrentTeb()->GdiTebBatch */
 struct teb_data

@@ -260,8 +260,6 @@ built-in exact-path Rockstar launcher processes through D3DMetal with the
 companion enabled. The launched game continues to use the global
 `GRAPHICS_BACKEND`. No application list or registry value is required.
 
-WFUSync remains independent of graphics selection and can be enabled for any of these commands with `WINEWFUSYNC=1`.
-
 ## Supported Launchers
 
 Launcher compatibility is tested as part of the WineForge game-focused runtime path.
@@ -296,23 +294,33 @@ Battle.net is supported for installation, sign-in, library, download, and game l
 
 Ubisoft Connect is supported for installation, sign-in, library, download, and game launch workflows.
 
-## WFUSync
+## USync 6
 
-WFUSync is an opt-in WineForge userspace synchronization backend for macOS.
+USync 6 is WineForge's opt-in userspace synchronization backend for macOS,
+succeeding WFUSync. It keeps supported synchronization state in shared memory
+and uses atomic operations for fast acquisition.
 
-Enable it with:
+- Fast paths for Events, Semaphores and Mutexes, including WaitAny and atomic
+  WaitAll for supported combinations.
+- Fewer unnecessary wake calls on uncontended operations, with native macOS
+  wait/wake primitives for blocked threads.
+- Improved PulseEvent handling, safe object and thread slot reuse, and
+  protection against APC interruption races.
+- Wine server handling for unsupported waits and operations that require it.
+
+Enable it when launching an application:
 
 ```sh
-WINEWFUSYNC=1
+WINEUSYNC=1 wine /path/to/application.exe
 ```
 
-Disable it by unsetting the variable or setting:
+Disable it by unsetting `WINEUSYNC` or setting it to `0`. When migrating from
+WFUSync, replace `WINEWFUSYNC` with `WINEUSYNC`. The old variable no longer
+enables this backend.
 
-```sh
-WINEWFUSYNC=0
-```
-
-Unsupported waits and sensitive synchronization semantics remain on the Wine server fallback path. Probe and targeted validation have shown good results, but this is not claimed as a guaranteed per-game performance improvement.
+USync works independently of graphics selection with both D3DMetal and DXMT,
+including games launched through the native Steam bridge. It does not change
+the graphics backend selected for a process.
 
 ## Contributing
 

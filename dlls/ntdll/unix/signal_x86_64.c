@@ -1,5 +1,6 @@
 /*
  * x86-64 signal handling routines
+ * WineForge-Internal: usync-v6.
  *
  * Copyright 1999, 2005 Alexandre Julliard
  *
@@ -2556,6 +2557,11 @@ static void int_handler( int signal, siginfo_t *siginfo, void *_sigcontext )
     struct thread_data *data = init_handler( sigcontext );
     HANDLE handle;
 
+    if (usync_defer_signal( data, signal ))
+    {
+        leave_handler( data, sigcontext );
+        return;
+    }
     if (p__wine_ctrl_routine)
     {
         if (!NtCreateThreadEx( &handle, THREAD_ALL_ACCESS, NULL, NtCurrentProcess(),
@@ -2595,6 +2601,11 @@ static void quit_handler( int signal, siginfo_t *siginfo, void *_sigcontext )
     ucontext_t *sigcontext = _sigcontext;
     struct thread_data *data = init_handler( sigcontext );
 
+    if (usync_defer_signal( data, signal ))
+    {
+        leave_handler( data, sigcontext );
+        return;
+    }
     if (is_inside_syscall( data, RSP_sig(sigcontext) )) abort_thread( 0 );
     user_mode_abort_thread( 0, get_syscall_frame( data ));
 }
@@ -2610,6 +2621,11 @@ static void usr1_handler( int signal, siginfo_t *siginfo, void *_sigcontext )
     ucontext_t *sigcontext = _sigcontext;
     struct thread_data *data = init_handler( sigcontext );
 
+    if (usync_defer_signal( data, signal ))
+    {
+        leave_handler( data, sigcontext );
+        return;
+    }
     if (!data->teb)
     {
         server_select( NULL, 0, SELECT_INTERRUPTIBLE, 0, NULL, NULL );

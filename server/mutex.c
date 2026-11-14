@@ -1,5 +1,6 @@
 /*
  * Server-side mutex management
+ * WineForge-Internal: usync-v6.
  *
  * Copyright (C) 1998 Alexandre Julliard
  *
@@ -34,7 +35,7 @@
 #include "thread.h"
 #include "request.h"
 #include "security.h"
-#include "wfusync.h"
+#include "usync.h"
 
 static const WCHAR mutex_name[] = {'M','u','t','a','n','t'};
 
@@ -57,8 +58,8 @@ struct mutex_sync
     unsigned int        count;              /* recursion count */
     int                 abandoned;          /* has it been abandoned? */
     struct list         entry;              /* entry in owner thread mutex list */
-    struct list         wfusync_entry;      /* entry in WFUSync mutex list */
-    struct wfusync     *wfusync;            /* optional shared fast-path state */
+    struct list         usync_entry;      /* entry in USync mutex list */
+    struct usync     *usync;            /* optional shared fast-path state */
 };
 
 static void mutex_sync_dump( struct object *obj, int verbose );
@@ -68,7 +69,7 @@ static int mutex_sync_signaled( struct object *obj, struct wait_queue_entry *ent
 static void mutex_sync_satisfied( struct object *obj, struct wait_queue_entry *entry );
 static void mutex_sync_destroy( struct object *obj );
 
-static struct list wfusync_mutexes = LIST_INIT( wfusync_mutexes );
+static struct list usync_mutexes = LIST_INIT( usync_mutexes );
 
 static const struct object_ops mutex_sync_ops =
 {
@@ -126,7 +127,7 @@ static int mutex_sync_add_queue( struct object *obj, struct wait_queue_entry *en
 {
     struct mutex_sync *mutex = (struct mutex_sync *)obj;
     assert( obj->ops == &mutex_sync_ops );
-    if (mutex->wfusync) wfusync_add_server_waiter( mutex->wfusync );
+    if (mutex->usync) usync_add_server_waiter( mutex->usync );
     return add_queue( obj, entry );
 }
 
@@ -134,7 +135,7 @@ static void mutex_sync_remove_queue( struct object *obj, struct wait_queue_entry
 {
     struct mutex_sync *mutex = (struct mutex_sync *)obj;
     assert( obj->ops == &mutex_sync_ops );
-    if (mutex->wfusync) wfusync_remove_server_waiter( mutex->wfusync );
+    if (mutex->usync) usync_remove_server_waiter( mutex->usync );
     remove_queue( obj, entry );
 }
 
@@ -142,10 +143,10 @@ static void mutex_sync_destroy( struct object *obj )
 {
     struct mutex_sync *mutex = (struct mutex_sync *)obj;
     assert( obj->ops == &mutex_sync_ops );
-    if (mutex->wfusync)
+    if (mutex->usync)
     {
-        list_remove( &mutex->wfusync_entry );
-        wfusync_destroy( mutex->wfusync );
+        list_remove( &mutex->usync_entry );
+        usync_destroy( mutex->usync );
     }
     assert( !mutex->count );
 }
@@ -154,7 +155,7 @@ static int mutex_sync_signaled( struct object *obj, struct wait_queue_entry *ent
 {
     struct mutex_sync *mutex = (struct mutex_sync *)obj;
     assert( obj->ops == &mutex_sync_ops );
-    if (mutex->wfusync) return wfusync_mutex_signaled( mutex->wfusync, get_wait_queue_thread( entry )->id );
+    if (mutex->usync) return usync_mutex_signaled( mutex->usync, get_wait_queue_thread( entry )->id );
     return (!mutex->count || (mutex->owner == get_wait_queue_thread( entry )));
 }
 
@@ -165,9 +166,9 @@ static void mutex_sync_satisfied( struct object *obj, struct wait_queue_entry *e
 
     assert( obj->ops == &mutex_sync_ops );
 
-    if (mutex->wfusync)
+    if (mutex->usync)
     {
-        if (wfusync_mutex_satisfied( mutex->wfusync, get_wait_queue_thread( entry )->id, &abandoned ) &&
+        if (usync_mutex_satisfied( mutex->usync, get_wait_queue_thread( entry )->id, &abandoned ) &&
             abandoned)
             make_wait_abandoned( entry );
         return;
@@ -186,14 +187,14 @@ static struct object *create_mutex_sync( int owned, int inproc )
     mutex->count = 0;
     mutex->owner = NULL;
     mutex->abandoned = 0;
-    list_init( &mutex->wfusync_entry );
-    mutex->wfusync = NULL;
-    if (inproc && do_wfusync())
+    list_init( &mutex->usync_entry );
+    mutex->usync = NULL;
+    if (inproc && do_usync())
     {
-        mutex->wfusync = create_wfusync( owned ? current->id : 0, owned ? 1 : 0, INPROC_SYNC_MUTEX );
-        if (mutex->wfusync)
+        mutex->usync = create_usync( owned ? current->id : 0, owned ? 1 : 0, INPROC_SYNC_MUTEX );
+        if (mutex->usync)
         {
-            list_add_tail( &wfusync_mutexes, &mutex->wfusync_entry );
+            list_add_tail( &usync_mutexes, &mutex->usync_entry );
             return &mutex->obj;
         }
         clear_error();
@@ -243,14 +244,14 @@ void abandon_mutexes( struct thread *thread )
         do_release( mutex, thread, mutex->count );
     }
 
-    LIST_FOR_EACH( ptr, &wfusync_mutexes )
+    LIST_FOR_EACH( ptr, &usync_mutexes )
     {
-        struct mutex_sync *mutex = LIST_ENTRY( ptr, struct mutex_sync, wfusync_entry );
+        struct mutex_sync *mutex = LIST_ENTRY( ptr, struct mutex_sync, usync_entry );
 
-        if (wfusync_abandon_mutex( mutex->wfusync, thread->id ))
+        if (usync_abandon_mutex( mutex->usync, thread->id ))
         {
             wake_up( &mutex->obj, 0 );
-            wfusync_wake_waiters( wfusync_get_index( mutex->wfusync ) );
+            usync_wake_waiters( usync_get_index( mutex->usync ) );
         }
     }
 
@@ -292,13 +293,17 @@ static int mutex_signal( struct object *obj, unsigned int access, int signal )
         set_error( STATUS_ACCESS_DENIED );
         return 0;
     }
-    if (((struct mutex_sync *)mutex->sync)->wfusync)
+    if (((struct mutex_sync *)mutex->sync)->usync)
     {
         unsigned int prev;
 
-        if (!wfusync_release_mutex( ((struct mutex_sync *)mutex->sync)->wfusync, current->id, &prev ))
+        if (!usync_release_mutex( ((struct mutex_sync *)mutex->sync)->usync, current->id, &prev ))
             return 0;
-        if (prev == 1) wake_up( mutex->sync, 0 );
+        if (prev == 1)
+        {
+            wake_up( mutex->sync, 0 );
+            usync_wake_waiters( usync_get_index( ((struct mutex_sync *)mutex->sync)->usync ) );
+        }
         return 1;
     }
     return do_release( (struct mutex_sync *)mutex->sync, current, 1 );
@@ -311,19 +316,19 @@ static void mutex_destroy( struct object *obj )
     if (mutex->sync) release_object( mutex->sync );
 }
 
-int get_mutex_wfusync_idx( struct object *obj, int *type )
+int get_mutex_usync_idx( struct object *obj, int *type )
 {
     struct mutex_sync *sync;
     struct mutex *mutex;
 
-    if (!do_wfusync() || !obj || obj->ops != &mutex_ops) return -1;
+    if (!do_usync() || !obj || obj->ops != &mutex_ops) return -1;
     mutex = (struct mutex *)obj;
     if (!mutex->sync || mutex->sync->ops != &mutex_sync_ops) return -1;
     sync = (struct mutex_sync *)mutex->sync;
-    if (!sync->wfusync) return -1;
-    wfusync_grab_object( sync->wfusync );
+    if (!sync->usync) return -1;
+
     *type = INPROC_SYNC_MUTEX;
-    return wfusync_get_index( sync->wfusync );
+    return usync_get_index( sync->usync );
 }
 
 /* create a mutex */
@@ -355,13 +360,13 @@ DECL_HANDLER(release_mutex)
         struct mutex_sync *sync = (struct mutex_sync *)mutex->sync;
         assert( mutex->sync->ops == &mutex_sync_ops ); /* never called with inproc syncs */
 
-        if (sync->wfusync)
+        if (sync->usync)
         {
-            if (wfusync_release_mutex( sync->wfusync, current->id, &reply->prev_count ) &&
+            if (usync_release_mutex( sync->usync, current->id, &reply->prev_count ) &&
                 reply->prev_count == 1)
             {
                 wake_up( mutex->sync, 0 );
-                wfusync_wake_waiters( wfusync_get_index( sync->wfusync ) );
+                usync_wake_waiters( usync_get_index( sync->usync ) );
             }
         }
         else
@@ -384,8 +389,8 @@ DECL_HANDLER(query_mutex)
         struct mutex_sync *sync = (struct mutex_sync *)mutex->sync;
         assert( mutex->sync->ops == &mutex_sync_ops ); /* never called with inproc syncs */
 
-        if (sync->wfusync)
-            wfusync_get_mutex_state( sync->wfusync, current->id, &reply->count,
+        if (sync->usync)
+            usync_get_mutex_state( sync->usync, current->id, &reply->count,
                                      &reply->owned, &reply->abandoned );
         else
         {

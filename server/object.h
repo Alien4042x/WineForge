@@ -272,9 +272,9 @@ extern void signal_inproc_sync( struct inproc_sync *sync );
 extern void reset_inproc_sync( struct inproc_sync *sync );
 extern int get_inproc_event_state( struct object *obj, int *manual, int *signaled );
 extern int set_inproc_event_state( struct object *obj, int signaled );
-extern int get_event_wfusync_idx( struct object *obj, int *type );
-extern int get_semaphore_wfusync_idx( struct object *obj, int *type );
-extern int get_mutex_wfusync_idx( struct object *obj, int *type );
+extern int get_event_usync_idx( struct object *obj, int *type );
+extern int get_semaphore_usync_idx( struct object *obj, int *type );
+extern int get_mutex_usync_idx( struct object *obj, int *type );
 
 /* serial functions */
 

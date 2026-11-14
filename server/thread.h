@@ -1,5 +1,6 @@
 /*
  * Wine server threads
+ * WineForge-Internal: usync-v6.
  *
  * Copyright (C) 1998 Alexandre Julliard
  *
@@ -52,6 +53,10 @@ struct thread
     struct object          obj;           /* object header */
     struct object         *sync;          /* sync object for wait/signal */
     struct inproc_sync    *alert_sync;    /* inproc sync for user apc alerts */
+#ifdef __APPLE__
+
+    unsigned int           usync_wait_slot; /* owned until thread cleanup */
+#endif
     struct list            entry;         /* entry in system-wide thread list */
     struct list            proc_entry;    /* entry in per-process thread list */
     struct list            desktop_entry; /* entry in per-desktop thread list */

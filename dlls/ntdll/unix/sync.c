@@ -1,5 +1,6 @@
 /*
  * Process synchronisation
+ * WineForge-Internal: usync-v6.
  *
  * Copyright 1996, 1997, 1998 Marcus Meissner
  * Copyright 1997, 1999 Alexandre Julliard
@@ -71,7 +72,7 @@
 #include "wine/server.h"
 #include "wine/debug.h"
 #include "unix_private.h"
-#include "wfusync.h"
+#include "usync.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(sync);
 
@@ -680,12 +681,12 @@ static NTSTATUS get_server_inproc_sync( HANDLE handle, struct inproc_sync *sync 
             sync->access = reply->access;
             sync->type = reply->type;
             sync->closed = 0;
-            wfusync_cache_inproc_sync( handle, reply->type, reply->access, reply->shm_idx, sync->fd );
+            usync_cache_inproc_sync( handle, reply->type, reply->access, reply->shm_idx, sync->fd );
         }
     }
     SERVER_END_REQ;
 
-    if (ret) wfusync_note_fallback( handle, ret );
+    if (ret) usync_note_fallback( handle, ret );
     return ret;
 }
 
@@ -765,10 +766,10 @@ void close_inproc_sync( HANDLE handle )
 {
     struct inproc_sync *cache;
 
-    wfusync_drop_handle( handle );
+    usync_drop_handle( handle );
 
 #ifdef __APPLE__
-    if (inproc_device_fd < 0 && !do_wfusync()) return;
+    if (inproc_device_fd < 0 && !do_usync()) return;
 #else
     if (inproc_device_fd < 0) return;
 #endif
@@ -805,25 +806,25 @@ static NTSTATUS inproc_query_semaphore( HANDLE handle, SEMAPHORE_BASIC_INFORMATI
     return ret;
 }
 
-static NTSTATUS warm_wfusync_event_cache( HANDLE handle )
+static NTSTATUS warm_usync_event_cache( HANDLE handle )
 {
     struct inproc_sync stack, *sync;
     NTSTATUS ret;
 
-    if (!do_wfusync() || !wfusync_handle_is_local_event( handle )) return STATUS_NOT_IMPLEMENTED;
-    if (wfusync_get_cached_state( handle, NULL )) return STATUS_NOT_IMPLEMENTED;
+    if (!do_usync() || !usync_handle_is_local_event( handle )) return STATUS_NOT_IMPLEMENTED;
+    if (usync_get_cached_state( handle, NULL )) return STATUS_NOT_IMPLEMENTED;
     if ((ret = get_inproc_sync( handle, INPROC_SYNC_EVENT, EVENT_MODIFY_STATE, &stack, &sync ))) return ret;
     release_inproc_sync( sync );
     return STATUS_SUCCESS;
 }
 
-static NTSTATUS warm_wfusync_semaphore_cache( HANDLE handle )
+static NTSTATUS warm_usync_semaphore_cache( HANDLE handle )
 {
     struct inproc_sync stack, *sync;
     NTSTATUS ret;
 
-    if (!do_wfusync() || !wfusync_handle_is_local_semaphore( handle )) return STATUS_NOT_IMPLEMENTED;
-    if (wfusync_get_cached_state( handle, NULL )) return STATUS_NOT_IMPLEMENTED;
+    if (!do_usync() || !usync_handle_is_local_semaphore( handle )) return STATUS_NOT_IMPLEMENTED;
+    if (usync_get_cached_state( handle, NULL )) return STATUS_NOT_IMPLEMENTED;
     if ((ret = get_inproc_sync( handle, INPROC_SYNC_SEMAPHORE,
                                 SEMAPHORE_MODIFY_STATE, &stack, &sync ))) return ret;
     release_inproc_sync( sync );
@@ -939,34 +940,44 @@ static NTSTATUS inproc_wait( DWORD count, const HANDLE *handles, WAIT_TYPE type,
     if (inproc_device_fd < 0)
     {
 #ifdef __APPLE__
-        if (do_wfusync() && count == 1 && type == WaitAny && wfusync_handle_is_local_event( handles[0] ))
+        if (do_usync() && count == 1 && type == WaitAny && usync_handle_is_local_event( handles[0] ))
         {
             ret = get_inproc_sync( handles[0], INPROC_SYNC_EVENT, SYNCHRONIZE, &stack[0], &syncs[0] );
             if (ret) return ret;
             release_inproc_sync( syncs[0] );
         }
-        else if (do_wfusync() && count == 1 && type == WaitAny &&
-                 wfusync_handle_is_local_semaphore( handles[0] ))
+        else if (do_usync() && count == 1 && type == WaitAny &&
+                 usync_handle_is_local_semaphore( handles[0] ))
         {
             ret = get_inproc_sync( handles[0], INPROC_SYNC_SEMAPHORE, SYNCHRONIZE, &stack[0], &syncs[0] );
             if (ret) return ret;
             release_inproc_sync( syncs[0] );
         }
-        else if (do_wfusync() && count == 1 && type == WaitAny &&
-                 wfusync_handle_is_local_mutex( handles[0] ))
+        else if (do_usync() && count == 1 && type == WaitAny &&
+                 usync_handle_is_local_mutex( handles[0] ))
         {
             ret = get_inproc_sync( handles[0], INPROC_SYNC_MUTEX, SYNCHRONIZE, &stack[0], &syncs[0] );
             if (ret) return ret;
             release_inproc_sync( syncs[0] );
         }
-        else if (do_wfusync() && count > 1 && type == WaitAny)
+
+        else if (do_usync() && count > 1 && count <= ARRAY_SIZE(syncs) &&
+                 (type == WaitAny || type == WaitAll) && !alertable &&
+                 (!timeout || timeout->QuadPart <= 0))
         {
+            enum inproc_sync_type desired[ARRAY_SIZE(syncs)];
             int i;
 
             for (i = 0; i < count; i++)
             {
-                if (!wfusync_handle_is_local_event( handles[i] )) return STATUS_NOT_IMPLEMENTED;
-                ret = get_inproc_sync( handles[i], INPROC_SYNC_EVENT, SYNCHRONIZE, &stack[i], &syncs[i] );
+                if (usync_handle_is_local_event( handles[i] )) desired[i] = INPROC_SYNC_EVENT;
+                else if (usync_handle_is_local_semaphore( handles[i] )) desired[i] = INPROC_SYNC_SEMAPHORE;
+                else if (usync_handle_is_local_mutex( handles[i] )) desired[i] = INPROC_SYNC_MUTEX;
+                else return STATUS_NOT_IMPLEMENTED;
+            }
+            for (i = 0; i < count; i++)
+            {
+                ret = get_inproc_sync( handles[i], desired[i], SYNCHRONIZE, &stack[i], &syncs[i] );
                 if (ret)
                 {
                     while (i--) release_inproc_sync( syncs[i] );
@@ -1064,7 +1075,7 @@ NTSTATUS WINAPI NtCreateSemaphore( HANDLE *handle, ACCESS_MASK access, const OBJ
     }
     SERVER_END_REQ;
 
-    if (!ret) wfusync_mark_local_semaphore( *handle );
+    if (!ret) usync_mark_local_semaphore( *handle );
 
     free( objattr );
     return ret;
@@ -1107,7 +1118,7 @@ NTSTATUS WINAPI NtOpenSemaphore( HANDLE *handle, ACCESS_MASK access, const OBJEC
         *handle = wine_server_ptr_handle( reply->handle );
     }
     SERVER_END_REQ;
-    if (!ret) wfusync_mark_local_semaphore( *handle );
+    if (!ret) usync_mark_local_semaphore( *handle );
     return ret;
 }
 
@@ -1164,13 +1175,13 @@ NTSTATUS WINAPI NtReleaseSemaphore( HANDLE handle, LONG count, ULONG *previous )
 
     TRACE( "handle %p, count %u, prev_count %p\n", handle, count, previous );
 
-    if (count <= 0)
+    if ((LONG)count <= 0)
         return STATUS_INVALID_PARAMETER;
 
-    if ((ret = wfusync_release_semaphore( handle, count, previous )) != STATUS_NOT_IMPLEMENTED)
+    if ((ret = usync_release_semaphore( handle, count, previous )) != STATUS_NOT_IMPLEMENTED)
         return ret;
-    if (!warm_wfusync_semaphore_cache( handle ) &&
-        (ret = wfusync_release_semaphore( handle, count, previous )) != STATUS_NOT_IMPLEMENTED)
+    if (!warm_usync_semaphore_cache( handle ) &&
+        (ret = usync_release_semaphore( handle, count, previous )) != STATUS_NOT_IMPLEMENTED)
         return ret;
 
     if ((ret = inproc_release_semaphore( handle, count, previous )) != STATUS_NOT_IMPLEMENTED)
@@ -1232,7 +1243,7 @@ NTSTATUS WINAPI NtCreateEvent( HANDLE *handle, ACCESS_MASK access, const OBJECT_
     }
     SERVER_END_REQ;
 
-    if (!ret) wfusync_mark_local_event( *handle );
+    if (!ret) usync_mark_local_event( *handle );
 
     free( objattr );
     return ret;
@@ -1275,7 +1286,7 @@ NTSTATUS WINAPI NtOpenEvent( HANDLE *handle, ACCESS_MASK access, const OBJECT_AT
         *handle = wine_server_ptr_handle( reply->handle );
     }
     SERVER_END_REQ;
-    if (!ret) wfusync_mark_local_event( *handle );
+    if (!ret) usync_mark_local_event( *handle );
     return ret;
 }
 
@@ -1292,10 +1303,10 @@ NTSTATUS WINAPI NtSetEvent( HANDLE handle, LONG *prev_state )
 
     TRACE( "handle %p, prev_state %p\n", handle, prev_state );
 
-    if ((ret = wfusync_set_event( handle, prev_state )) != STATUS_NOT_IMPLEMENTED)
+    if ((ret = usync_set_event( handle, prev_state )) != STATUS_NOT_IMPLEMENTED)
         return ret;
-    if (!warm_wfusync_event_cache( handle ) &&
-        (ret = wfusync_set_event( handle, prev_state )) != STATUS_NOT_IMPLEMENTED)
+    if (!warm_usync_event_cache( handle ) &&
+        (ret = usync_set_event( handle, prev_state )) != STATUS_NOT_IMPLEMENTED)
         return ret;
 
     if ((ret = inproc_set_event( handle, prev_state )) != STATUS_NOT_IMPLEMENTED)
@@ -1345,10 +1356,10 @@ NTSTATUS WINAPI NtResetEvent( HANDLE handle, LONG *prev_state )
 
     TRACE( "handle %p, prev_state %p\n", handle, prev_state );
 
-    if ((ret = wfusync_reset_event( handle, prev_state )) != STATUS_NOT_IMPLEMENTED)
+    if ((ret = usync_reset_event( handle, prev_state )) != STATUS_NOT_IMPLEMENTED)
         return ret;
-    if (!warm_wfusync_event_cache( handle ) &&
-        (ret = wfusync_reset_event( handle, prev_state )) != STATUS_NOT_IMPLEMENTED)
+    if (!warm_usync_event_cache( handle ) &&
+        (ret = usync_reset_event( handle, prev_state )) != STATUS_NOT_IMPLEMENTED)
         return ret;
 
     if ((ret = inproc_reset_event( handle, prev_state )) != STATUS_NOT_IMPLEMENTED)
@@ -1458,7 +1469,7 @@ NTSTATUS WINAPI NtQueryEvent( HANDLE handle, EVENT_INFORMATION_CLASS class,
 
     if (len != sizeof(EVENT_BASIC_INFORMATION)) return STATUS_INFO_LENGTH_MISMATCH;
 
-    if ((ret = wfusync_query_event( handle, out )) != STATUS_NOT_IMPLEMENTED)
+    if ((ret = usync_query_event( handle, out )) != STATUS_NOT_IMPLEMENTED)
     {
         if (!ret && ret_len) *ret_len = sizeof(EVENT_BASIC_INFORMATION);
         return ret;
@@ -1511,7 +1522,7 @@ NTSTATUS WINAPI NtCreateMutant( HANDLE *handle, ACCESS_MASK access, const OBJECT
     }
     SERVER_END_REQ;
 
-    if (!ret) wfusync_mark_local_mutex( *handle );
+    if (!ret) usync_mark_local_mutex( *handle );
 
     free( objattr );
     return ret;
@@ -1541,7 +1552,7 @@ NTSTATUS WINAPI NtOpenMutant( HANDLE *handle, ACCESS_MASK access, const OBJECT_A
         *handle = wine_server_ptr_handle( reply->handle );
     }
     SERVER_END_REQ;
-    if (!ret) wfusync_mark_local_mutex( *handle );
+    if (!ret) usync_mark_local_mutex( *handle );
     return ret;
 }
 
@@ -1555,7 +1566,7 @@ NTSTATUS WINAPI NtReleaseMutant( HANDLE handle, LONG *prev_count )
 
     TRACE( "handle %p, prev_count %p\n", handle, prev_count );
 
-    if ((ret = wfusync_release_mutex( handle, prev_count )) != STATUS_NOT_IMPLEMENTED)
+    if ((ret = usync_release_mutex( handle, prev_count )) != STATUS_NOT_IMPLEMENTED)
         return ret;
 
     if ((ret = inproc_release_mutex( handle, prev_count )) != STATUS_NOT_IMPLEMENTED)
@@ -1591,7 +1602,7 @@ NTSTATUS WINAPI NtQueryMutant( HANDLE handle, MUTANT_INFORMATION_CLASS class,
 
     if (len != sizeof(MUTANT_BASIC_INFORMATION)) return STATUS_INFO_LENGTH_MISMATCH;
 
-    if ((ret = wfusync_query_mutex( handle, out )) != STATUS_NOT_IMPLEMENTED)
+    if ((ret = usync_query_mutex( handle, out )) != STATUS_NOT_IMPLEMENTED)
     {
         if (!ret && ret_len) *ret_len = sizeof(MUTANT_BASIC_INFORMATION);
         return ret;
@@ -2544,7 +2555,7 @@ NTSTATUS WINAPI NtWaitForMultipleObjects( DWORD count, const HANDLE *handles, WA
         if (is_pseudo_handle( handles[i] )) return STATUS_INVALID_HANDLE;
     }
 
-    if ((ret = wfusync_wait_multiple( count, handles, type, alertable, timeout )) != STATUS_NOT_IMPLEMENTED)
+    if ((ret = usync_wait_multiple( count, handles, type, alertable, timeout )) != STATUS_NOT_IMPLEMENTED)
     {
         TRACE( "-> %#x\n", ret );
         return ret;
@@ -2557,7 +2568,7 @@ NTSTATUS WINAPI NtWaitForMultipleObjects( DWORD count, const HANDLE *handles, WA
     }
 
 #ifdef __APPLE__
-    if ((ret = wfusync_wait_multiple( count, handles, type, alertable, timeout )) != STATUS_NOT_IMPLEMENTED)
+    if ((ret = usync_wait_multiple( count, handles, type, alertable, timeout )) != STATUS_NOT_IMPLEMENTED)
     {
         TRACE( "-> %#x\n", ret );
         return ret;
@@ -2584,19 +2595,19 @@ NTSTATUS WINAPI NtWaitForSingleObject( HANDLE handle, BOOLEAN alertable, const L
 
     TRACE( "handle %p, alertable %u, timeout %s\n", handle, alertable, debugstr_timeout(timeout) );
 
-    if ((ret = wfusync_wait_event( handle, alertable, timeout )) != STATUS_NOT_IMPLEMENTED)
+    if ((ret = usync_wait_event( handle, alertable, timeout )) != STATUS_NOT_IMPLEMENTED)
     {
         TRACE( "-> %#x\n", ret );
         return ret;
     }
 
-    if ((ret = wfusync_wait_semaphore( handle, alertable, timeout )) != STATUS_NOT_IMPLEMENTED)
+    if ((ret = usync_wait_semaphore( handle, alertable, timeout )) != STATUS_NOT_IMPLEMENTED)
     {
         TRACE( "-> %#x\n", ret );
         return ret;
     }
 
-    if ((ret = wfusync_wait_mutex( handle, alertable, timeout )) != STATUS_NOT_IMPLEMENTED)
+    if ((ret = usync_wait_mutex( handle, alertable, timeout )) != STATUS_NOT_IMPLEMENTED)
     {
         TRACE( "-> %#x\n", ret );
         return ret;
@@ -2608,19 +2619,19 @@ NTSTATUS WINAPI NtWaitForSingleObject( HANDLE handle, BOOLEAN alertable, const L
         return ret;
     }
 
-    if ((ret = wfusync_wait_event( handle, alertable, timeout )) != STATUS_NOT_IMPLEMENTED)
+    if ((ret = usync_wait_event( handle, alertable, timeout )) != STATUS_NOT_IMPLEMENTED)
     {
         TRACE( "-> %#x\n", ret );
         return ret;
     }
 
-    if ((ret = wfusync_wait_semaphore( handle, alertable, timeout )) != STATUS_NOT_IMPLEMENTED)
+    if ((ret = usync_wait_semaphore( handle, alertable, timeout )) != STATUS_NOT_IMPLEMENTED)
     {
         TRACE( "-> %#x\n", ret );
         return ret;
     }
 
-    if ((ret = wfusync_wait_mutex( handle, alertable, timeout )) != STATUS_NOT_IMPLEMENTED)
+    if ((ret = usync_wait_mutex( handle, alertable, timeout )) != STATUS_NOT_IMPLEMENTED)
     {
         TRACE( "-> %#x\n", ret );
         return ret;

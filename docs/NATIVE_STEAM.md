@@ -47,7 +47,14 @@ The app runtime expects these bridge artifacts in addition to the matching Wine 
 
 The packaging layer copies the helper to the private libexec path. A plain Wine build does not create the complete app integration or its validation receipt. Native hook and overlay-shim builds remain outside this Wine source tree.
 
-The host application owns per-game prefixes, private Valve PE deployment, registry registration, D3DMetal or DXMT selection, WFUSync and HUD settings. The loader bridge is enabled only for that native Steam launch route.
+The host application owns per-game prefixes, private Valve PE deployment, registry registration, D3DMetal or DXMT selection, synchronization settings and HUD settings. The loader bridge is enabled only for that native Steam launch route.
+
+USync 6 is included in the Wine source and is enabled for a native Steam game
+by setting `WINEUSYNC=1` in that game's Wine environment. The native Steam
+bridge remains enabled separately with `WINEFORGE_STEAM_BRIDGE=1`. Unset
+`WINEUSYNC` or set it to `0` to use Wine's standard synchronization paths.
+Launchers migrating from WFUSync must replace `WINEWFUSYNC` with `WINEUSYNC`.
+The old variable no longer enables the backend.
 
 ## Source provenance
 

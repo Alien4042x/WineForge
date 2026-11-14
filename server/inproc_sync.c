@@ -1,5 +1,6 @@
 /*
  * In-process synchronization primitives
+ * WineForge-Internal: usync-v6.
  *
  * Copyright (C) 2021-2022 Elizabeth Figura for CodeWeavers
  *
@@ -32,7 +33,7 @@
 #include "request.h"
 #include "thread.h"
 #include "user.h"
-#include "wfusync.h"
+#include "usync.h"
 
 #ifdef HAVE_LINUX_NTSYNC_H
 # include <linux/ntsync.h>
@@ -240,7 +241,7 @@ struct inproc_sync
 {
     struct object          obj;  /* object header */
     enum inproc_sync_type  type;
-    struct wfusync        *wfusync;
+    struct usync        *usync;
     struct list            entry;
 };
 
@@ -267,19 +268,19 @@ int get_inproc_device_fd(void)
 int get_inproc_sync_fd( struct inproc_sync *sync )
 {
     if (!sync) return -1;
-    return wfusync_get_index( sync->wfusync );
+    return usync_get_index( sync->usync );
 }
 
-static struct inproc_sync *create_wfusync_inproc_sync( enum inproc_sync_type type, int low, int high )
+static struct inproc_sync *create_usync_inproc_sync( enum inproc_sync_type type, int low, int high )
 {
     struct inproc_sync *sync;
 
     if (!(sync = alloc_object( &inproc_sync_ops ))) return NULL;
     sync->type = type;
-    sync->wfusync = create_wfusync( low, high, type );
+    sync->usync = create_usync( low, high, type );
     list_init( &sync->entry );
 
-    if (!sync->wfusync)
+    if (!sync->usync)
     {
         set_error( STATUS_NO_MEMORY );
         release_object( sync );
@@ -290,17 +291,17 @@ static struct inproc_sync *create_wfusync_inproc_sync( enum inproc_sync_type typ
 
 struct inproc_sync *create_inproc_internal_sync( int manual, int signaled )
 {
-    return create_wfusync_inproc_sync( INPROC_SYNC_INTERNAL, signaled, manual );
+    return create_usync_inproc_sync( INPROC_SYNC_INTERNAL, signaled, manual );
 }
 
 struct inproc_sync *create_inproc_event_sync( int manual, int signaled )
 {
-    return create_wfusync_inproc_sync( INPROC_SYNC_EVENT, signaled, manual );
+    return create_usync_inproc_sync( INPROC_SYNC_EVENT, signaled, manual );
 }
 
 struct inproc_sync *create_inproc_mutex_sync( thread_id_t owner, unsigned int count )
 {
-    struct inproc_sync *mutex = create_wfusync_inproc_sync( INPROC_SYNC_MUTEX, owner, count );
+    struct inproc_sync *mutex = create_usync_inproc_sync( INPROC_SYNC_MUTEX, owner, count );
 
     if (mutex) list_add_tail( &inproc_mutexes, &mutex->entry );
     return mutex;
@@ -308,27 +309,27 @@ struct inproc_sync *create_inproc_mutex_sync( thread_id_t owner, unsigned int co
 
 struct inproc_sync *create_inproc_semaphore_sync( unsigned int initial, unsigned int max )
 {
-    return create_wfusync_inproc_sync( INPROC_SYNC_SEMAPHORE, initial, max );
+    return create_usync_inproc_sync( INPROC_SYNC_SEMAPHORE, initial, max );
 }
 
 static void inproc_sync_dump( struct object *obj, int verbose )
 {
     struct inproc_sync *sync = (struct inproc_sync *)obj;
     assert( obj->ops == &inproc_sync_ops );
-    fprintf( stderr, "WFUSync inproc type=%d, shm_idx=%u\n",
-             sync->type, wfusync_get_index( sync->wfusync ) );
+    fprintf( stderr, "USync inproc type=%d, shm_idx=%u\n",
+             sync->type, usync_get_index( sync->usync ) );
 }
 
 void signal_inproc_sync( struct inproc_sync *sync )
 {
-    if (debug_level) fprintf( stderr, "set_wfusync_event %u\n", wfusync_get_index( sync->wfusync ) );
-    wfusync_set_event( sync->wfusync );
+    if (debug_level) fprintf( stderr, "set_usync_event %u\n", usync_get_index( sync->usync ) );
+    usync_set_event( sync->usync );
 }
 
 void reset_inproc_sync( struct inproc_sync *sync )
 {
-    if (debug_level) fprintf( stderr, "reset_wfusync_event %u\n", wfusync_get_index( sync->wfusync ) );
-    wfusync_reset_event( sync->wfusync );
+    if (debug_level) fprintf( stderr, "reset_usync_event %u\n", usync_get_index( sync->usync ) );
+    usync_reset_event( sync->usync );
 }
 
 int get_inproc_event_state( struct object *obj, int *manual, int *signaled )
@@ -337,7 +338,7 @@ int get_inproc_event_state( struct object *obj, int *manual, int *signaled )
 
     if (!obj || obj->ops != &inproc_sync_ops) return 0;
     sync = (struct inproc_sync *)obj;
-    return wfusync_get_event_state( sync->wfusync, manual, signaled );
+    return usync_get_event_state( sync->usync, manual, signaled );
 }
 
 int set_inproc_event_state( struct object *obj, int signaled )
@@ -346,9 +347,9 @@ int set_inproc_event_state( struct object *obj, int signaled )
 
     if (!obj || obj->ops != &inproc_sync_ops) return 0;
     sync = (struct inproc_sync *)obj;
-    if (!wfusync_get_event_state( sync->wfusync, NULL, NULL )) return 0;
-    if (signaled) wfusync_set_event( sync->wfusync );
-    else wfusync_reset_event( sync->wfusync );
+    if (!usync_get_event_state( sync->usync, NULL, NULL )) return 0;
+    if (signaled) usync_set_event( sync->usync );
+    else usync_reset_event( sync->usync );
     return 1;
 }
 
@@ -370,7 +371,7 @@ static void inproc_sync_destroy( struct object *obj )
     struct inproc_sync *sync = (struct inproc_sync *)obj;
     assert( obj->ops == &inproc_sync_ops );
     if (sync->type == INPROC_SYNC_MUTEX) list_remove( &sync->entry );
-    wfusync_destroy( sync->wfusync );
+    usync_destroy( sync->usync );
 }
 
 void abandon_inproc_mutexes( thread_id_t tid )
@@ -378,7 +379,7 @@ void abandon_inproc_mutexes( thread_id_t tid )
     struct inproc_sync *mutex;
 
     LIST_FOR_EACH_ENTRY( mutex, &inproc_mutexes, struct inproc_sync, entry )
-        wfusync_abandon_mutex( mutex->wfusync, tid );
+        usync_abandon_mutex( mutex->usync, tid );
 }
 
 static int get_obj_inproc_sync( struct object *obj, int *type )
@@ -386,18 +387,18 @@ static int get_obj_inproc_sync( struct object *obj, int *type )
     struct object *sync;
     int shm_idx = -1;
 
-    if (!do_wfusync()) return -1;
-    if ((shm_idx = get_event_wfusync_idx( obj, type )) >= 0) return shm_idx;
-    if ((shm_idx = get_semaphore_wfusync_idx( obj, type )) >= 0) return shm_idx;
-    if ((shm_idx = get_mutex_wfusync_idx( obj, type )) >= 0) return shm_idx;
+    if (!do_usync()) return -1;
+    if ((shm_idx = get_event_usync_idx( obj, type )) >= 0) return shm_idx;
+    if ((shm_idx = get_semaphore_usync_idx( obj, type )) >= 0) return shm_idx;
+    if ((shm_idx = get_mutex_usync_idx( obj, type )) >= 0) return shm_idx;
 
     if (!(sync = get_obj_sync( obj ))) return -1;
     if (sync->ops == &inproc_sync_ops)
     {
         struct inproc_sync *inproc = (struct inproc_sync *)sync;
-        wfusync_grab_object( inproc->wfusync );
+
         *type = inproc->type;
-        shm_idx = wfusync_get_index( inproc->wfusync );
+        shm_idx = usync_get_index( inproc->usync );
     }
 
     release_object( sync );
@@ -479,10 +480,10 @@ DECL_HANDLER(get_inproc_sync_fd)
     else
     {
 #if defined(__APPLE__)
-        if (do_wfusync())
+        if (do_usync())
         {
             reply->shm_idx = fd;
-            send_client_fd( current->process, wfusync_get_shared_fd(), req->handle );
+            send_client_fd( current->process, usync_get_shared_fd(), req->handle );
         }
         else
 #endif

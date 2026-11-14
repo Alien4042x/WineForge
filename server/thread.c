@@ -1,5 +1,6 @@
 /*
  * Server-side thread management
+ * WineForge-Internal: usync-v6.
  *
  * Copyright (C) 1998 Alexandre Julliard
  *
@@ -59,6 +60,8 @@
 #include "request.h"
 #include "user.h"
 #include "security.h"
+
+#include "usync.h"
 
 
 /* thread queues */
@@ -348,6 +351,9 @@ static inline void init_thread_structure( struct thread *thread )
 
     thread->sync            = NULL;
     thread->alert_sync      = NULL;
+#ifdef __APPLE__
+    thread->usync_wait_slot = 0;
+#endif
     thread->unix_pid        = -1;  /* not known yet */
     thread->unix_tid        = -1;  /* not known yet */
     thread->context         = NULL;
@@ -560,6 +566,9 @@ static void cleanup_thread( struct thread *thread )
 {
     int i;
 
+#ifdef __APPLE__
+    usync_cleanup_thread( thread );
+#endif
     cleanup_thread_completion( thread );
     if (thread->context)
     {
@@ -1596,6 +1605,9 @@ void kill_thread( struct thread *thread, int violent_death )
         /* if it is waiting on the socket, we don't need to send a SIGQUIT */
         violent_death = 0;
     }
+#ifdef __APPLE__
+    usync_cleanup_thread( thread );
+#endif
     kill_console_processes( thread, 0 );
     abandon_mutexes( thread );
     signal_sync( thread->sync );
