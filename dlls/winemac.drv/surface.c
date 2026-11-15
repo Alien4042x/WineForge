@@ -178,7 +178,9 @@ static BOOL macdrv_surface_flush(struct window_surface *window_surface, const RE
      * content in the window_surface */
     if ((data = get_win_data(window_surface->hwnd)))
     {
-        if (data->client_view)
+        /* WineForge-Internal: launcher-compat/epic-launcher-v1.
+         * Epic keeps a masked Metal root and a software CEF child visible together. */
+        if (data->client_view && !macdrv_preserve_epic_client_view(window_surface->hwnd, data))
         {
             macdrv_set_view_hidden(data->client_view, TRUE);
             data->client_view = NULL;

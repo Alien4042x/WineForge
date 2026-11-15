@@ -1261,6 +1261,17 @@ static void epic_update_unreal_client_view_frame(HWND hwnd, struct macdrv_win_da
         macdrv_set_view_metal_exclusion_rect(data->client_view, CGRectNull);
 }
 
+bool macdrv_preserve_epic_client_view(HWND hwnd, const struct macdrv_win_data *data)
+{
+    RECT rect;
+    HWND browser;
+
+    if (!is_epic_unreal_root_window(hwnd) || !data->client_view ||
+        !macdrv_get_view_d3dmetal_client_surface(data->client_view)) return FALSE;
+    if (!epic_get_browser_rect(hwnd, data, &browser, &rect) || !NtUserIsWindowVisible(browser)) return FALSE;
+    return TRUE;
+}
+
 static void macdrv_client_surface_present(struct client_surface *client, HDC hdc)
 {
     struct macdrv_client_surface *surface = impl_from_client_surface(client);

@@ -20,6 +20,8 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
  */
 
+/* WineForge-Internal: launcher-compat/epic-launcher-v1. */
+
 #ifndef __WINE_MACDRV_H
 #define __WINE_MACDRV_H
 
@@ -263,6 +265,7 @@ extern bool macdrv_client_surface_acquire_metal_swapchain(struct macdrv_client_s
 
 extern struct macdrv_win_data *get_win_data(HWND hwnd);
 extern void release_win_data(struct macdrv_win_data *data);
+extern bool macdrv_preserve_epic_client_view(HWND hwnd, const struct macdrv_win_data *data);
 extern void init_win_context(void);
 extern WineWindow *macdrv_get_cocoa_window(HWND hwnd, bool require_on_screen);
 extern RGNDATA *get_region_data(HRGN hrgn, HDC hdc_lptodp);
