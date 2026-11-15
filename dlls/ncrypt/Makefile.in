@@ -1,6 +1,7 @@
+# WineForge-Internal: crypto/cng-p256-persistence-v1.
 IMPORTLIB = ncrypt
 MODULE    = ncrypt.dll
-IMPORTS   = bcrypt
+IMPORTS   = bcrypt crypt32 advapi32
 
 SOURCES = \
 	main.c

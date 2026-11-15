@@ -24,6 +24,8 @@
 #include "ntstatus.h"
 #include "windef.h"
 #include "winbase.h"
+#include "winreg.h"
+#include "wincrypt.h"
 #include "ncrypt.h"
 #include "bcrypt.h"
 #include "wine/debug.h"
@@ -69,11 +71,14 @@ struct key
     struct object     obj;
     enum algid        algid;
     BCRYPT_KEY_HANDLE handle;
+    WCHAR            *name;
+    BOOL              overwrite;
 };
 
 struct provider
 {
     struct object obj;
+    BOOL software;
 };
 
 static SECURITY_STATUS map_ntstatus(NTSTATUS status)
@@ -250,6 +255,136 @@ static struct key *create_key_object(enum algid algid, NCRYPT_PROV_HANDLE provid
     return key;
 }
 
+/* WineForge-Internal: crypto/cng-p256-persistence-v1.
+ * Keep current-user software P-256 keys protected across process lifetimes.
+ * Other providers, algorithms and machine-key storage retain their existing path. */
+static const WCHAR p256_storage_path[] = L"Software\\Wine\\Crypto\\CNG\\P256";
+
+struct stored_p256_key
+{
+    DWORD magic;
+    DWORD version;
+    DWORD blob_size;
+    DWORD export_policy;
+    BYTE blob[];
+};
+
+static SECURITY_STATUS storage_error(LONG error)
+{
+    if (!error) return ERROR_SUCCESS;
+    if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND) return NTE_BAD_KEYSET;
+    if (error == ERROR_ACCESS_DENIED) return NTE_PERM;
+    return NTE_FAIL;
+}
+
+static SECURITY_STATUS p256_storage_name(const WCHAR *name, WCHAR output[65])
+{
+    static const WCHAR hex[] = L"0123456789abcdef";
+    BYTE hash[32];
+    SIZE_T length;
+    unsigned int i;
+    NTSTATUS status;
+
+    if (!name || !(length = wcslen(name)) || length > 512) return NTE_INVALID_PARAMETER;
+    status = BCryptHash(BCRYPT_SHA256_ALG_HANDLE, NULL, 0, (BYTE *)name,
+                        length * sizeof(WCHAR), hash, sizeof(hash));
+    if (status) return map_ntstatus(status);
+    for (i = 0; i < sizeof(hash); ++i)
+    {
+        output[2 * i] = hex[hash[i] >> 4];
+        output[2 * i + 1] = hex[hash[i] & 15];
+    }
+    output[64] = 0;
+    return ERROR_SUCCESS;
+}
+
+static SECURITY_STATUS p256_key_exists(const WCHAR *name, BOOL *exists)
+{
+    WCHAR value_name[65];
+    HKEY storage;
+    LONG error;
+    SECURITY_STATUS status;
+
+    *exists = FALSE;
+    if ((status = p256_storage_name(name, value_name))) return status;
+    error = RegOpenKeyExW(HKEY_CURRENT_USER, p256_storage_path, 0, KEY_QUERY_VALUE, &storage);
+    if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND) return ERROR_SUCCESS;
+    if (error) return storage_error(error);
+    error = RegQueryValueExW(storage, value_name, NULL, NULL, NULL, NULL);
+    RegCloseKey(storage);
+    if (error == ERROR_FILE_NOT_FOUND) return ERROR_SUCCESS;
+    if (error) return storage_error(error);
+    *exists = TRUE;
+    return ERROR_SUCCESS;
+}
+
+static HANDLE lock_p256_storage(void)
+{
+    HANDLE mutex = CreateMutexW(NULL, FALSE, L"Local\\Wine.NCrypt.P256.Persistence.v1");
+    DWORD wait;
+
+    if (!mutex) return NULL;
+    wait = WaitForSingleObject(mutex, 5000);
+    if (wait == WAIT_OBJECT_0 || wait == WAIT_ABANDONED) return mutex;
+    CloseHandle(mutex);
+    return NULL;
+}
+
+static SECURITY_STATUS store_p256_key(struct key *key)
+{
+    struct stored_p256_key *record = NULL;
+    struct object_property *policy;
+    DATA_BLOB plain, protected = {0}, entropy;
+    WCHAR value_name[65];
+    DWORD size = 0;
+    HANDLE mutex = NULL;
+    HKEY storage;
+    BOOL exists;
+    LONG error;
+    SECURITY_STATUS status;
+
+    if ((status = p256_storage_name(key->name, value_name))) return status;
+    if ((status = map_ntstatus(BCryptExportKey(key->handle, NULL, BCRYPT_ECCPRIVATE_BLOB,
+                                             NULL, 0, &size, 0)))) return status;
+    if (size != sizeof(BCRYPT_ECCKEY_BLOB) + 3 * 32) return NTE_BAD_DATA;
+    plain.cbData = sizeof(*record) + size;
+    if (!(record = calloc(1, plain.cbData))) return NTE_NO_MEMORY;
+    record->magic = 0x31474e43;
+    record->version = 1;
+    record->blob_size = size;
+    policy = get_object_property(&key->obj, NCRYPT_EXPORT_POLICY_PROPERTY);
+    if (!policy || policy->value_size != sizeof(DWORD)) { status = NTE_BAD_DATA; goto done; }
+    record->export_policy = *(DWORD *)policy->value;
+    if ((status = map_ntstatus(BCryptExportKey(key->handle, NULL, BCRYPT_ECCPRIVATE_BLOB,
+                                             record->blob, size, &size, 0)))) goto done;
+    plain.pbData = (BYTE *)record;
+    entropy.pbData = (BYTE *)key->name;
+    entropy.cbData = (wcslen(key->name) + 1) * sizeof(WCHAR);
+    if (!CryptProtectData(&plain, L"Wine CNG P-256 key", &entropy, NULL, NULL,
+                         CRYPTPROTECT_UI_FORBIDDEN, &protected))
+    {
+        status = NTE_FAIL;
+        goto done;
+    }
+    if (!(mutex = lock_p256_storage())) { status = NTE_FAIL; goto done; }
+    if ((status = p256_key_exists(key->name, &exists))) goto done;
+    if (exists && !key->overwrite) { status = NTE_EXISTS; goto done; }
+    error = RegCreateKeyExW(HKEY_CURRENT_USER, p256_storage_path, 0, NULL, 0,
+                            KEY_SET_VALUE, NULL, &storage, NULL);
+    if (!error)
+    {
+        error = RegSetValueExW(storage, value_name, 0, REG_BINARY, protected.pbData, protected.cbData);
+        RegCloseKey(storage);
+    }
+    status = storage_error(error);
+
+done:
+    if (mutex) { ReleaseMutex(mutex); CloseHandle(mutex); }
+    if (protected.pbData) LocalFree(protected.pbData);
+    if (record) { SecureZeroMemory(record, plain.cbData); free(record); }
+    return status;
+}
+
 SECURITY_STATUS WINAPI NCryptCreatePersistedKey(NCRYPT_PROV_HANDLE provider, NCRYPT_KEY_HANDLE *handle,
                                                 const WCHAR *algid, const WCHAR *name, DWORD keyspec, DWORD flags)
 {
@@ -257,13 +392,24 @@ SECURITY_STATUS WINAPI NCryptCreatePersistedKey(NCRYPT_PROV_HANDLE provider, NCR
     DWORD bitlen;
     NTSTATUS status;
     BCRYPT_ALG_HANDLE alg;
+    BOOL persist, exists;
+    SECURITY_STATUS ret;
 
     TRACE("(%#Ix, %p, %s, %s, %#lx, %#lx)\n", provider, handle, wine_dbgstr_w(algid), wine_dbgstr_w(name),
           keyspec, flags);
 
-    if (!provider) return NTE_INVALID_HANDLE;
+    if (!provider || ((struct provider *)provider)->obj.type != PROVIDER) return NTE_INVALID_HANDLE;
     if (!algid) return HRESULT_FROM_WIN32(RPC_X_NULL_REF_POINTER);
-    if (name) FIXME("Persistent keys are not supported\n");
+    if (!handle) return NTE_INVALID_PARAMETER;
+    persist = name && !keyspec && !(flags & NCRYPT_MACHINE_KEY_FLAG) &&
+              ((struct provider *)provider)->software && !wcsicmp(algid, BCRYPT_ECDSA_P256_ALGORITHM);
+    if (persist)
+    {
+        if (flags & ~(NCRYPT_OVERWRITE_KEY_FLAG | NCRYPT_SILENT_FLAG)) return NTE_BAD_FLAGS;
+        if ((ret = p256_key_exists(name, &exists))) return ret;
+        if (exists && !(flags & NCRYPT_OVERWRITE_KEY_FLAG)) return NTE_EXISTS;
+    }
+    else if (name) FIXME("Persistent keys are not supported for this provider or algorithm\n");
 
     if (!wcsicmp(algid, BCRYPT_RSA_ALGORITHM))
     {
@@ -303,6 +449,22 @@ SECURITY_STATUS WINAPI NCryptCreatePersistedKey(NCRYPT_PROV_HANDLE provider, NCR
     set_object_property(&key->obj, NCRYPT_LENGTH_PROPERTY, (BYTE *)&bitlen, sizeof(bitlen));
     set_object_property(&key->obj, BCRYPT_PUBLIC_KEY_LENGTH, (BYTE *)&bitlen, sizeof(bitlen));
 
+    if (persist)
+    {
+        if (!(key->name = wcsdup(name)))
+        {
+            NCryptFreeObject((NCRYPT_HANDLE)key);
+            return NTE_NO_MEMORY;
+        }
+        key->overwrite = !!(flags & NCRYPT_OVERWRITE_KEY_FLAG);
+        if ((ret = set_object_property(&key->obj, NCRYPT_NAME_PROPERTY, (BYTE *)name,
+                                      (wcslen(name) + 1) * sizeof(WCHAR))))
+        {
+            NCryptFreeObject((NCRYPT_HANDLE)key);
+            return ret;
+        }
+    }
+
     *handle = (NCRYPT_KEY_HANDLE)key;
     return ERROR_SUCCESS;
 }
@@ -323,6 +485,30 @@ SECURITY_STATUS WINAPI NCryptDecrypt(NCRYPT_KEY_HANDLE handle, BYTE *input, DWOR
 
 SECURITY_STATUS WINAPI NCryptDeleteKey(NCRYPT_KEY_HANDLE key, DWORD flags)
 {
+    struct key *object = (struct key *)key;
+    WCHAR value_name[65];
+    HANDLE mutex;
+    HKEY storage;
+    LONG error;
+    SECURITY_STATUS status;
+
+    if (!object || object->obj.type != KEY) return NTE_INVALID_HANDLE;
+    if (object->name)
+    {
+        if (flags & ~NCRYPT_SILENT_FLAG) return NTE_BAD_FLAGS;
+        if ((status = p256_storage_name(object->name, value_name))) return status;
+        if (!(mutex = lock_p256_storage())) return NTE_FAIL;
+        error = RegOpenKeyExW(HKEY_CURRENT_USER, p256_storage_path, 0, KEY_SET_VALUE, &storage);
+        if (!error)
+        {
+            error = RegDeleteValueW(storage, value_name);
+            RegCloseKey(storage);
+        }
+        ReleaseMutex(mutex);
+        CloseHandle(mutex);
+        if ((status = storage_error(error))) return status;
+        return NCryptFreeObject(key);
+    }
     FIXME("(%#Ix, %#lx): stub\n", key, flags);
     return NTE_NOT_SUPPORTED;
 }
@@ -370,6 +556,7 @@ SECURITY_STATUS WINAPI NCryptFinalizeKey(NCRYPT_KEY_HANDLE handle, DWORD flags)
     TRACE("(%#Ix, %#lx)\n", handle, flags);
 
     if (!key || key->obj.type != KEY) return NTE_INVALID_HANDLE;
+    if (key->name && (flags & ~NCRYPT_SILENT_FLAG)) return NTE_BAD_FLAGS;
 
     if (!(prop = get_object_property(&key->obj, NCRYPT_LENGTH_PROPERTY))) return NTE_INVALID_HANDLE;
     key_length = *(DWORD *)prop->value;
@@ -387,7 +574,7 @@ SECURITY_STATUS WINAPI NCryptFinalizeKey(NCRYPT_KEY_HANDLE handle, DWORD flags)
         return map_ntstatus(status);
     }
 
-    return ERROR_SUCCESS;
+    return key->name ? store_p256_key(key) : ERROR_SUCCESS;
 }
 
 SECURITY_STATUS WINAPI NCryptFreeBuffer(PVOID buf)
@@ -416,6 +603,7 @@ SECURITY_STATUS WINAPI NCryptFreeObject(NCRYPT_HANDLE handle)
     {
         struct key *key = (struct key *)object;
         if ((ret = map_ntstatus( BCryptDestroyKey(key->handle) ))) return ret;
+        free(key->name);
         break;
     }
     case PROVIDER:
@@ -632,8 +820,73 @@ BOOL WINAPI NCryptIsKeyHandle(NCRYPT_KEY_HANDLE hKey)
 SECURITY_STATUS WINAPI NCryptOpenKey(NCRYPT_PROV_HANDLE provider, NCRYPT_KEY_HANDLE *key,
                                      const WCHAR *name, DWORD keyspec, DWORD flags)
 {
-    FIXME("(%#Ix, %p, %s, %#lx, %#lx): stub\n", provider, key, wine_dbgstr_w(name), keyspec, flags);
-    return NTE_NOT_SUPPORTED;
+    WCHAR value_name[65];
+    struct stored_p256_key *record;
+    BCRYPT_ECCKEY_BLOB *blob;
+    DATA_BLOB protected = {0}, plain = {0}, entropy;
+    DWORD type, size;
+    HKEY storage;
+    LONG error;
+    SECURITY_STATUS status;
+    struct key *object;
+
+    TRACE("(%#Ix, %p, %s, %#lx, %#lx)\n", provider, key, wine_dbgstr_w(name), keyspec, flags);
+    if (!provider || ((struct provider *)provider)->obj.type != PROVIDER) return NTE_INVALID_HANDLE;
+    if (!key || !name) return NTE_INVALID_PARAMETER;
+    if (!((struct provider *)provider)->software || (flags & NCRYPT_MACHINE_KEY_FLAG)) return NTE_NOT_SUPPORTED;
+    if (flags & ~NCRYPT_SILENT_FLAG) return NTE_BAD_FLAGS;
+    if (keyspec) return NTE_NOT_SUPPORTED;
+    if ((status = p256_storage_name(name, value_name))) return status;
+    *key = 0;
+    error = RegOpenKeyExW(HKEY_CURRENT_USER, p256_storage_path, 0, KEY_QUERY_VALUE, &storage);
+    if (error) return storage_error(error);
+    size = 0;
+    error = RegQueryValueExW(storage, value_name, NULL, &type, NULL, &size);
+    if (error) { RegCloseKey(storage); return storage_error(error); }
+    if (type != REG_BINARY || !size || size > 4096) { RegCloseKey(storage); return NTE_BAD_DATA; }
+    if (!(protected.pbData = malloc(size))) { RegCloseKey(storage); return NTE_NO_MEMORY; }
+    protected.cbData = size;
+    error = RegQueryValueExW(storage, value_name, NULL, &type, protected.pbData, &protected.cbData);
+    RegCloseKey(storage);
+    status = storage_error(error);
+    if (status) goto done;
+    if (type != REG_BINARY) { status = NTE_BAD_DATA; goto done; }
+    entropy.pbData = (BYTE *)name;
+    entropy.cbData = (wcslen(name) + 1) * sizeof(WCHAR);
+    if (!CryptUnprotectData(&protected, NULL, &entropy, NULL, NULL, CRYPTPROTECT_UI_FORBIDDEN, &plain))
+    {
+        status = NTE_BAD_DATA;
+        goto done;
+    }
+    record = (struct stored_p256_key *)plain.pbData;
+    if (plain.cbData != sizeof(*record) + sizeof(*blob) + 3 * 32 ||
+        record->magic != 0x31474e43 || record->version != 1 ||
+        record->blob_size != sizeof(*blob) + 3 * 32)
+    {
+        status = NTE_BAD_DATA;
+        goto done;
+    }
+    blob = (BCRYPT_ECCKEY_BLOB *)record->blob;
+    if (blob->dwMagic != BCRYPT_ECDSA_PRIVATE_P256_MAGIC || blob->cbKey != 32)
+    {
+        status = NTE_BAD_DATA;
+        goto done;
+    }
+    status = NCryptImportKey(provider, 0, BCRYPT_ECCPRIVATE_BLOB, NULL, key,
+                             record->blob, record->blob_size, 0);
+    if (status) goto done;
+    object = (struct key *)*key;
+    if (!(object->name = wcsdup(name))) status = NTE_NO_MEMORY;
+    else status = set_object_property(&object->obj, NCRYPT_NAME_PROPERTY, (BYTE *)name,
+                                      (wcslen(name) + 1) * sizeof(WCHAR));
+    if (!status) status = set_object_property(&object->obj, NCRYPT_EXPORT_POLICY_PROPERTY,
+                                             (BYTE *)&record->export_policy, sizeof(record->export_policy));
+    if (status) { NCryptFreeObject(*key); *key = 0; }
+
+done:
+    if (plain.pbData) { SecureZeroMemory(plain.pbData, plain.cbData); LocalFree(plain.pbData); }
+    free(protected.pbData);
+    return status;
 }
 
 SECURITY_STATUS WINAPI NCryptOpenStorageProvider(NCRYPT_PROV_HANDLE *handle, const WCHAR *name, DWORD flags)
@@ -647,6 +900,7 @@ SECURITY_STATUS WINAPI NCryptOpenStorageProvider(NCRYPT_PROV_HANDLE *handle, con
         ERR("Error allocating memory.\n");
         return NTE_NO_MEMORY;
     }
+    provider->software = !name || !wcsicmp(name, MS_KEY_STORAGE_PROVIDER);
     *handle = (NCRYPT_PROV_HANDLE)provider;
     return ERROR_SUCCESS;
 }
