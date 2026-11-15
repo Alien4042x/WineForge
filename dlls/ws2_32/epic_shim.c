@@ -745,7 +745,7 @@ static BOOL epic_eosh_replace_operations_response( SOCKET s, char *buf, DWORD ca
     if (binding.completed)
     {
         if (!completed) return FALSE;
-        status = "Completed";
+        status = binding.cancelled ? "Cancelled" : "Completed";
         completed_row = row;
     }
     else if (binding.suspended || (binding.paused && !running))
