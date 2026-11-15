@@ -9,6 +9,7 @@ VER_PRODUCTVERSION = 5,1,2600,5512
 
 SOURCES = \
 	async.c \
+	epic_shim.c \
 	inaddr.c \
 	protocol.c \
 	rsrc.rc \

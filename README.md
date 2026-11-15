@@ -283,7 +283,10 @@ Steam is supported for storefront, library, download, and game launch workflows.
 
 Epic Games Launcher is supported for storefront, download, install, and game launch workflows.
 
-Known issue: opening the Friends/social panel can show a black surface in the Store UI. The launcher otherwise remains functional. This appears tied to Epic's accelerated browser surface. WineForge does not currently have a reliable launcher-side switch to disable that GPU acceleration path.
+**Known limitation:** opening the Friends/chat panel can leave a black or
+unresponsive window and block the launcher UI. If this happens, fully close
+Epic Games Launcher and restart it. The EOS overlay rendering issue remains
+unresolved.
 
 ### EA App
 
