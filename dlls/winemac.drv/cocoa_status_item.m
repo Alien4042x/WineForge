@@ -27,6 +27,7 @@
 
 #pragma GCC diagnostic ignored "-Wdeclaration-after-statement"
 
+/* WineForge-Internal: macos-integration/status-item-input-v1. */
 
 @interface WineStatusItem : NSView
 {
@@ -120,7 +121,9 @@
 
         event = macdrv_create_event(STATUS_ITEM_MOUSE_BUTTON, nil);
         event->status_item_mouse_button.item = self;
-        event->status_item_mouse_button.button = [nsevent buttonNumber];
+        /* Synthesized right-click events may report buttonNumber zero. */
+        event->status_item_mouse_button.button =
+                (typeMask & (NSEventMaskRightMouseDown | NSEventMaskRightMouseUp)) ? 1 : [nsevent buttonNumber];
         event->status_item_mouse_button.down = (typeMask & (NSEventMaskLeftMouseDown |
                                                             NSEventMaskRightMouseDown |
                                                             NSEventMaskOtherMouseDown)) != 0;
